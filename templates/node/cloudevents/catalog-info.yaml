@@ -3,7 +3,7 @@ kind: Component
 metadata:
   name: ${{ values.name | dump }}
   description: ${{ values.description | dump }}
-  annotations:
+  labels:
     - knative.dev/func-template: node-cloudevents
 spec:
   type: service
