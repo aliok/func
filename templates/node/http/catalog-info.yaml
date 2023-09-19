@@ -3,8 +3,8 @@ kind: Component
 metadata:
   name: ${{ values.name | dump }}
   description: ${{ values.description | dump }}
-  tags:
-    - knative.dev/func-template: node-http
+  annotations:
+    - "knative.dev/func-template": "node-http"
 spec:
   type: service
   owner: user:guest
