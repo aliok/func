@@ -5,5 +5,5 @@ metadata:
   description: A collection of all the templates for the Knative Functions
 spec:
   targets:
-    - ../custom-template/template.yaml
-    # - ../templates/node/cloudevents
+    - ./node-cloudevents-template.yaml
+    - ./node-http-template.yaml

@@ -1,0 +1,11 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ${{ values.name | dump }}
+  description: ${{ values.description | dump }}
+  tags:
+    - knative.dev/func-template: node-cloudevents
+spec:
+  type: service
+  owner: user:guest
+  lifecycle: experimental
