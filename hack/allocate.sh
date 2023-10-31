@@ -40,13 +40,16 @@ main() {
   echo "${em}Allocating...${me}"
 
   kubernetes
-  serving
-  dns
-  eventing
-  networking
-  registry
-  namespace
-  dapr_runtime
+  ( set -o pipefail; (serving && dns && networking) 2>&1 | sed  -e 's/^/svr /')&
+  ( set -o pipefail; (eventing && namespace) 2>&1 | sed  -e 's/^/evt /')&
+  ( set -o pipefail; registry 2>&1 | sed  -e 's/^/reg /') &
+  ( set -o pipefail; dapr_runtime 2>&1 | sed  -e 's/^/dpr /')&
+
+  local job
+  for job in $(jobs -p); do
+    wait "$job"
+  done
+
   next_steps
   
   echo "${em}DONE${me}"
@@ -128,6 +131,7 @@ networking() {
 
   echo "Install load balancer."
   kubectl apply -f "https://raw.githubusercontent.com/metallb/metallb/v0.13.7/config/manifests/metallb-native.yaml"
+  sleep 5
   kubectl wait --namespace metallb-system \
     --for=condition=ready pod \
     --selector=app=metallb \

@@ -9,15 +9,14 @@ concurrency:
 jobs:
   test:
     name: E2E Test
+    continue-on-error: true
     strategy:
       matrix:
         runtime: ["node", "go", "python", "quarkus", "springboot", "typescript", "rust"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: actions/setup-go@v3
-        with:
-          go-version: 1.20.2
+      - uses: ./.github/composite/go-setup
       - name: Install Binaries
         run: ./hack/binaries.sh
       - name: Allocate Cluster

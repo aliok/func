@@ -25,7 +25,7 @@ export NODE_DISTRO=linux-x64
 
 export KNATIVE_SERVING_VERSION=${KNATIVE_SERVING_VERSION:-latest}
 export KNATIVE_EVENTING_VERSION=${KNATIVE_EVENTING_VERSION:-latest}
-source "$(dirname "$0")/../vendor/knative.dev/hack/presubmit-tests.sh"
+source "$(go run knative.dev/hack/cmd/script presubmit-tests.sh)"
 
 FUNC_REPO_BRANCH_REF="${PULL_PULL_SHA}"
 export FUNC_REPO_BRANCH_REF
@@ -70,6 +70,12 @@ function install_rust() {
 
 function unit_tests() {
   local failed=0
+  header "Checking embedded templates"
+  go test knative.dev/func/pkg/filesystem -run '^\QTestFileSystems\E$/^\Qembedded\E$' -v || failed=1
+  if (( failed )); then
+     results_banner "Embedded templates check failed"
+     exit "${failed}"
+  fi
   header "Unit tests for $(go_mod_module_name)"
   make test || failed=1
   if (( failed )); then
