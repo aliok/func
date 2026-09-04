@@ -133,8 +133,8 @@ func (c Global) Apply(f fn.Function) Global {
 		c.Builder = f.Build.Builder
 	}
 	// opt 1: last deployed deployer
-	if f.Deploy.Deployer != "" {
-		c.Deployer = f.Deploy.Deployer
+	if f.Deploy.ActiveDeployer != "" {
+		c.Deployer = f.Deploy.ActiveDeployer
 	}
 	// opt 2: intent to deploy deployer
 	if f.Deployer != "" {

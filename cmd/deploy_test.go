@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -386,7 +387,7 @@ func TestDeploy_Envs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Mock deployer records f.Deploy.Deployer so later redeploys are not
+	// Mock deployer records f.Deploy.ActiveDeployer so later redeploys are not
 	// treated as the pre-field legacy (knative) case.
 	clientFn := NewTestClient(fn.WithDeployer(mock.NewDeployer()))
 
@@ -1187,7 +1188,7 @@ func TestDeploy_NamespaceRedeployWarning(t *testing.T) {
 	f := fn.Function{
 		Runtime: "go",
 		Root:    root,
-		Deploy:  fn.DeploySpec{Namespace: "funcns", Deployer: deployers.Default},
+		Deploy:  fn.DeploySpec{Namespace: "funcns", ActiveDeployer: deployers.Default},
 	}
 	f, err := fn.New().Init(f)
 	if err != nil {
@@ -1237,8 +1238,8 @@ func TestDeploy_NamespaceUpdateWarning(t *testing.T) {
 		Runtime: "go",
 		Root:    root,
 		Deploy: fn.DeploySpec{
-			Namespace: "myns",
-			Deployer:  deployers.Default,
+			Namespace:      "myns",
+			ActiveDeployer: deployers.Default,
 		},
 	}
 	f, err := fn.New().Init(f)
@@ -1389,7 +1390,7 @@ func TestDeploy_NamespaceChangePreservesExternalRegistry(t *testing.T) {
 		Runtime:  "go",
 		Root:     root,
 		Registry: "docker.io/user",
-		Deploy:   fn.DeploySpec{Namespace: "ns1", Deployer: deployers.Default},
+		Deploy:   fn.DeploySpec{Namespace: "ns1", ActiveDeployer: deployers.Default},
 	}
 	f, err := fn.New().Init(f)
 	if err != nil {
@@ -1424,7 +1425,7 @@ func TestDeploy_NamespaceChangeUpdatesInternalRegistry(t *testing.T) {
 		Runtime:  "go",
 		Root:     root,
 		Registry: "image-registry.openshift-image-registry.svc:5000/ns1",
-		Deploy:   fn.DeploySpec{Namespace: "ns1", Deployer: deployers.Default},
+		Deploy:   fn.DeploySpec{Namespace: "ns1", ActiveDeployer: deployers.Default},
 	}
 	f, err := fn.New().Init(f)
 	if err != nil {
@@ -2625,8 +2626,8 @@ func TestDeploy_DeployerPersists(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if loaded.Deploy.Deployer != deployers.Default {
-			t.Fatalf("expected persisted deployer %q, got %q", deployers.Default, loaded.Deploy.Deployer)
+		if loaded.Deploy.ActiveDeployer != deployers.Default {
+			t.Fatalf("expected persisted deployer %q, got %q", deployers.Default, loaded.Deploy.ActiveDeployer)
 		}
 	})
 
@@ -2655,8 +2656,8 @@ func TestDeploy_DeployerPersists(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if loaded.Deploy.Deployer != other {
-			t.Fatalf("expected persisted deployer %q, got %q", other, loaded.Deploy.Deployer)
+		if loaded.Deploy.ActiveDeployer != other {
+			t.Fatalf("expected persisted deployer %q, got %q", other, loaded.Deploy.ActiveDeployer)
 		}
 
 		// no --deployer flag: the flag defaults to the persisted value
@@ -2674,8 +2675,8 @@ func TestDeploy_DeployerPersists(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if loaded.Deploy.Deployer != other {
-			t.Fatalf("expected deployer to remain %q after a flag-less redeploy, got %q", other, loaded.Deploy.Deployer)
+		if loaded.Deploy.ActiveDeployer != other {
+			t.Fatalf("expected deployer to remain %q after a flag-less redeploy, got %q", other, loaded.Deploy.ActiveDeployer)
 		}
 	})
 }
@@ -2708,8 +2709,8 @@ func TestDeploy_DeployerGlobalConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Deploy.Deployer != k8s.KubernetesDeployerName {
-		t.Fatalf("expected the global config's deployer %q to seed the flagless deploy, got %q", k8s.KubernetesDeployerName, loaded.Deploy.Deployer)
+	if loaded.Deploy.ActiveDeployer != k8s.KubernetesDeployerName {
+		t.Fatalf("expected the global config's deployer %q to seed the flagless deploy, got %q", k8s.KubernetesDeployerName, loaded.Deploy.ActiveDeployer)
 	}
 }
 
@@ -2742,7 +2743,20 @@ func TestDeploy_DeployerSwitch(t *testing.T) {
 				Root:     root,
 				Registry: TestRegistry,
 				// Namespace set == already deployed, which is what the guard gates on.
-				Deploy: fn.DeploySpec{Namespace: "myns", Deployer: tt.deployedDep},
+				Deploy: fn.DeploySpec{Namespace: "myns", ActiveDeployer: tt.deployedDep},
+			}
+			// keda requires at least one trigger to be declared explicitly,
+			// but only matters when keda ends up the effective deployer for
+			// this attempt (an explicit switch away from it does not).
+			effectiveDeployer := tt.requested
+			if effectiveDeployer == "" {
+				effectiveDeployer = tt.deployedDep
+			}
+			if effectiveDeployer == keda.KedaDeployerName {
+				f.Deployer = keda.KedaDeployerName
+				f.Scale = &fn.ScaleOptions{
+					KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "http"}}},
+				}
 			}
 			if _, err := fn.New().Init(f); err != nil {
 				t.Fatal(err)
@@ -2850,8 +2864,8 @@ func TestDeploy_ExposeEmptyVsUnset(t *testing.T) {
 		if f.Expose != "" {
 			t.Errorf("expected intent expose empty, got %q", f.Expose)
 		}
-		if f.Deploy.Expose != "" {
-			t.Errorf("expected status expose empty, got %q", f.Deploy.Expose)
+		if f.Deploy.ActiveExpose != "" {
+			t.Errorf("expected status expose empty, got %q", f.Deploy.ActiveExpose)
 		}
 	})
 
@@ -2863,8 +2877,8 @@ func TestDeploy_ExposeEmptyVsUnset(t *testing.T) {
 			t.Fatalf("expected intent expose 'none', got %q", f.Expose)
 		}
 		// status is observed applied mode; "none"/empty both mean cluster-local
-		if f := loadFn(t, root); f.Deploy.Expose != "" {
-			t.Fatalf("expected status expose empty for cluster-local, got %q", f.Deploy.Expose)
+		if f := loadFn(t, root); f.Deploy.ActiveExpose != "" {
+			t.Fatalf("expected status expose empty for cluster-local, got %q", f.Deploy.ActiveExpose)
 		}
 
 		// redeploy without the flag should keep intent via flag default
@@ -2923,8 +2937,8 @@ func TestDeploy_ExposeRoutePersists(t *testing.T) {
 	if f.Expose != "route" {
 		t.Fatalf("expected intent expose 'route', got %q", f.Expose)
 	}
-	if f.Deploy.Expose != "route" {
-		t.Fatalf("expected status expose 'route', got %q", f.Deploy.Expose)
+	if f.Deploy.ActiveExpose != "route" {
+		t.Fatalf("expected status expose 'route', got %q", f.Deploy.ActiveExpose)
 	}
 }
 
@@ -2970,8 +2984,19 @@ func TestDeploy_ExposeIgnoredByDeployerNote(t *testing.T) {
 			// route cases need OpenShift gate open; none/empty do not care.
 			cleanup := k8s.SetOpenShiftForTest(true, nil)
 			defer cleanup()
-			if _, err := fn.New().Init(fn.Function{Runtime: "go", Root: root}); err != nil {
+			f, err := fn.New().Init(fn.Function{Runtime: "go", Root: root})
+			if err != nil {
 				t.Fatal(err)
+			}
+			if slices.Contains(tt.args, "keda") {
+				// keda requires at least one trigger to be declared explicitly.
+				f.Deployer = keda.KedaDeployerName
+				f.Scale = &fn.ScaleOptions{
+					KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "http"}}},
+				}
+				if err := f.Write(); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			builder := mock.NewBuilder()
@@ -2984,7 +3009,7 @@ func TestDeploy_ExposeIgnoredByDeployerNote(t *testing.T) {
 			var stderr strings.Builder
 			cmd.SetOut(&stderr)
 			cmd.SetErr(&stderr)
-			err := cmd.Execute()
+			err = cmd.Execute()
 
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -3042,7 +3067,7 @@ func TestDeploy_RemoteExposeRecordsObservation(t *testing.T) {
 			pipeliner.RunFn = func(f fn.Function) (string, fn.Function, error) {
 				// add exposure tracking to the base RunFn
 				url, f, err := base(f)
-				f.Deploy.Expose = tt.observed
+				f.Deploy.ActiveExpose = tt.observed
 				return url, f, err
 			}
 
@@ -3064,8 +3089,8 @@ func TestDeploy_RemoteExposeRecordsObservation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if f.Deploy.Expose != tt.wantRecord {
-				t.Errorf("Deploy.Expose = %q, want %q", f.Deploy.Expose, tt.wantRecord)
+			if f.Deploy.ActiveExpose != tt.wantRecord {
+				t.Errorf("Deploy.Expose = %q, want %q", f.Deploy.ActiveExpose, tt.wantRecord)
 			}
 			warned := strings.Contains(out.String(), "applied no external exposure")
 			if warned != tt.wantWarning {

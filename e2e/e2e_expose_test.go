@@ -60,6 +60,30 @@ import (
 // and s2i. Remote deploys keep pack: host cannot build in-cluster.
 // ---------------------------------------------------------------------------
 
+// setKedaHTTPTrigger declares an explicit http KEDA trigger in the func.yaml
+// at root. The keda deployer requires at least one trigger to be declared
+// explicitly (it no longer infers one), so tests that only care about HTTP
+// exposure/routing behavior need this to reach a deployable state.
+func setKedaHTTPTrigger(t *testing.T, root string) {
+	t.Helper()
+	f, err := fn.NewFunction(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// scale.keda requires deployer: keda, and this is written before the
+	// deploy command has a chance to set it from the --deployer flag.
+	f.Deployer = "keda"
+	if f.Scale == nil {
+		f.Scale = &fn.ScaleOptions{}
+	}
+	f.Scale.KEDA = &fn.KEDAScaleOptions{
+		Triggers: []fn.KEDATrigger{{Type: "http"}},
+	}
+	if err := f.Write(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // requiresOpenShift skips a test whose assertions need a real Route.
 func requiresOpenShift(t *testing.T) {
 	t.Helper()
@@ -177,8 +201,8 @@ func TestExpose_ClusterLocalByDefault(t *testing.T) {
 	if f.Expose != "" {
 		t.Errorf("expected no exposure intent recorded, got %q", f.Expose)
 	}
-	if f.Deploy.Expose != "" {
-		t.Errorf("expected no exposure applied, got %q", f.Deploy.Expose)
+	if f.Deploy.ActiveExpose != "" {
+		t.Errorf("expected no exposure applied, got %q", f.Deploy.ActiveExpose)
 	}
 }
 
@@ -194,11 +218,12 @@ func TestExpose_KedaRejectsLongName(t *testing.T) {
 	if len(name) != 45 {
 		t.Fatalf("test setup: expected a 45 character name, got %d", len(name))
 	}
-	fromCleanEnv(t, name)
+	root := fromCleanEnv(t, name)
 
 	if err := newCmd(t, "init", "-l=go").Run(); err != nil {
 		t.Fatal(err)
 	}
+	setKedaHTTPTrigger(t, root)
 
 	out, err := newCmdOutput(t, "deploy", "--builder=host", "--deployer=keda").CombinedOutput()
 	if err == nil {
@@ -238,8 +263,8 @@ func TestExpose_Route(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := f.Deploy.Namespace
-	if f.Deploy.Expose != "" {
-		t.Errorf("expected no exposure applied on a flagless deploy, got %q", f.Deploy.Expose)
+	if f.Deploy.ActiveExpose != "" {
+		t.Errorf("expected no exposure applied on a flagless deploy, got %q", f.Deploy.ActiveExpose)
 	}
 	if n := routeCount(t, ns, name, ns); n != 0 {
 		t.Fatalf("expected no Route for a cluster-local function, found %d in %q", n, ns)
@@ -257,8 +282,8 @@ func TestExpose_Route(t *testing.T) {
 	if f.Expose != fn.ExposeRoute {
 		t.Errorf("expected intent %q, got %q", fn.ExposeRoute, f.Expose)
 	}
-	if f.Deploy.Expose != fn.ExposeRoute {
-		t.Errorf("expected applied exposure %q, got %q", fn.ExposeRoute, f.Deploy.Expose)
+	if f.Deploy.ActiveExpose != fn.ExposeRoute {
+		t.Errorf("expected applied exposure %q, got %q", fn.ExposeRoute, f.Deploy.ActiveExpose)
 	}
 	ann := serviceAnnotations(t, ns, name)
 	if ann[k8s.RouteHostnameAnnotation] == "" {
@@ -279,8 +304,8 @@ func TestExpose_Route(t *testing.T) {
 	if f, err = fn.NewFunction(root); err != nil {
 		t.Fatal(err)
 	}
-	if f.Deploy.Expose != "" {
-		t.Errorf("expected applied exposure cleared after opting out, got %q", f.Deploy.Expose)
+	if f.Deploy.ActiveExpose != "" {
+		t.Errorf("expected applied exposure cleared after opting out, got %q", f.Deploy.ActiveExpose)
 	}
 	if n := routeCount(t, ns, name, ns); n != 0 {
 		t.Errorf("expected the Route removed on opt-out, found %d in %q", n, ns)
@@ -347,8 +372,8 @@ func TestExpose_RouteAllBuilders(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if f.Deploy.Expose != fn.ExposeRoute {
-				t.Errorf("expected applied exposure %q, got %q", fn.ExposeRoute, f.Deploy.Expose)
+			if f.Deploy.ActiveExpose != fn.ExposeRoute {
+				t.Errorf("expected applied exposure %q, got %q", fn.ExposeRoute, f.Deploy.ActiveExpose)
 			}
 			ns := f.Deploy.Namespace
 			ann := serviceAnnotations(t, ns, name)
@@ -379,6 +404,7 @@ func TestExpose_KedaRoute(t *testing.T) {
 	if err := newCmd(t, "init", "-l=go").Run(); err != nil {
 		t.Fatal(err)
 	}
+	setKedaHTTPTrigger(t, root)
 	if err := newCmd(t, "deploy", "--builder=host", "--deployer=keda", "--expose=route").Run(); err != nil {
 		t.Fatal(err)
 	}
@@ -388,11 +414,11 @@ func TestExpose_KedaRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.Deploy.Deployer != "keda" {
-		t.Fatalf("expected the keda deployer to be recorded, got %q", f.Deploy.Deployer)
+	if f.Deploy.ActiveDeployer != "keda" {
+		t.Fatalf("expected the keda deployer to be recorded, got %q", f.Deploy.ActiveDeployer)
 	}
-	if f.Deploy.Expose != fn.ExposeRoute {
-		t.Errorf("expected applied exposure %q, got %q", fn.ExposeRoute, f.Deploy.Expose)
+	if f.Deploy.ActiveExpose != fn.ExposeRoute {
+		t.Errorf("expected applied exposure %q, got %q", fn.ExposeRoute, f.Deploy.ActiveExpose)
 	}
 
 	// An exposed keda function must lead with its external URL. The bridge
@@ -413,8 +439,8 @@ func TestExpose_KedaRoute(t *testing.T) {
 	if f, err = fn.NewFunction(root); err != nil {
 		t.Fatal(err)
 	}
-	if f.Deploy.Expose != "" {
-		t.Errorf("expected applied exposure cleared after opting out, got %q", f.Deploy.Expose)
+	if f.Deploy.ActiveExpose != "" {
+		t.Errorf("expected applied exposure cleared after opting out, got %q", f.Deploy.ActiveExpose)
 	}
 }
 
@@ -470,6 +496,7 @@ func TestExpose_KedaToggle(t *testing.T) {
 	if err := newCmd(t, "init", "-l=go").Run(); err != nil {
 		t.Fatal(err)
 	}
+	setKedaHTTPTrigger(t, root)
 	if err := newCmd(t, "deploy", "--builder=host", "--deployer=keda", "--expose=route").Run(); err != nil {
 		t.Fatal(err)
 	}
@@ -535,6 +562,7 @@ func TestExpose_KedaDeleteCleansRoute(t *testing.T) {
 	if err := newCmd(t, "init", "-l=go").Run(); err != nil {
 		t.Fatal(err)
 	}
+	setKedaHTTPTrigger(t, root)
 	if err := newCmd(t, "deploy", "--builder=host", "--deployer=keda", "--expose=route").Run(); err != nil {
 		t.Fatal(err)
 	}
@@ -587,6 +615,7 @@ func TestExpose_KedaRouteDomain(t *testing.T) {
 	if err := newCmd(t, "init", "-l=go").Run(); err != nil {
 		t.Fatal(err)
 	}
+	setKedaHTTPTrigger(t, root)
 	if err := newCmd(t, "deploy", "--builder=host", "--deployer=keda", "--expose=route", "--domain="+domain).Run(); err != nil {
 		t.Fatal(err)
 	}
@@ -816,8 +845,8 @@ func TestExpose_RemoteRoute(t *testing.T) {
 	}
 	// Recorded from the cluster by the pipeline describer; empty here means
 	// the pipeline ran a func-util that ignored the intent.
-	if f.Deploy.Expose != fn.ExposeRoute {
-		t.Fatalf("expected applied exposure %q read back from the cluster, got %q", fn.ExposeRoute, f.Deploy.Expose)
+	if f.Deploy.ActiveExpose != fn.ExposeRoute {
+		t.Fatalf("expected applied exposure %q read back from the cluster, got %q", fn.ExposeRoute, f.Deploy.ActiveExpose)
 	}
 	ns := f.Deploy.Namespace
 	ann := serviceAnnotations(t, ns, name)
@@ -852,6 +881,7 @@ func TestExpose_RemoteKedaRoute(t *testing.T) {
 	if err := newCmd(t, "init", "-l=go").Run(); err != nil {
 		t.Fatal(err)
 	}
+	setKedaHTTPTrigger(t, root)
 	if err := newCmd(t, "deploy", "--remote", "--builder=pack", "--registry="+Registry,
 		"--deployer=keda", "--expose=route").Run(); err != nil {
 		t.Fatal(err)
@@ -862,11 +892,11 @@ func TestExpose_RemoteKedaRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.Deploy.Deployer != "keda" {
-		t.Fatalf("expected the keda deployer to be recorded, got %q", f.Deploy.Deployer)
+	if f.Deploy.ActiveDeployer != "keda" {
+		t.Fatalf("expected the keda deployer to be recorded, got %q", f.Deploy.ActiveDeployer)
 	}
-	if f.Deploy.Expose != fn.ExposeRoute {
-		t.Fatalf("expected applied exposure %q read back from the cluster, got %q", fn.ExposeRoute, f.Deploy.Expose)
+	if f.Deploy.ActiveExpose != fn.ExposeRoute {
+		t.Fatalf("expected applied exposure %q read back from the cluster, got %q", fn.ExposeRoute, f.Deploy.ActiveExpose)
 	}
 
 	ns := f.Deploy.Namespace
