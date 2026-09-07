@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -2718,6 +2719,19 @@ func TestDeploy_DeployerSwitch(t *testing.T) {
 				// Namespace set == already deployed, which is what the guard gates on.
 				Deploy: fn.DeploySpec{Namespace: "myns", Deployer: tt.deployedDep},
 			}
+			// keda requires at least one trigger to be declared explicitly,
+			// but only matters when keda ends up the effective deployer for
+			// this attempt (an explicit switch away from it does not).
+			effectiveDeployer := tt.requested
+			if effectiveDeployer == "" {
+				effectiveDeployer = tt.deployedDep
+			}
+			if effectiveDeployer == keda.KedaDeployerName {
+				f.Deployer = keda.KedaDeployerName
+				f.Deploy.Options.Scale = &fn.ScaleOptions{
+					KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "http"}}},
+				}
+			}
 			if _, err := fn.New().Init(f); err != nil {
 				t.Fatal(err)
 			}
@@ -2944,8 +2958,19 @@ func TestDeploy_ExposeIgnoredByDeployerNote(t *testing.T) {
 			// route cases need OpenShift gate open; none/empty do not care.
 			cleanup := k8s.SetOpenShiftForTest(true, nil)
 			defer cleanup()
-			if _, err := fn.New().Init(fn.Function{Runtime: "go", Root: root}); err != nil {
+			f, err := fn.New().Init(fn.Function{Runtime: "go", Root: root})
+			if err != nil {
 				t.Fatal(err)
+			}
+			if slices.Contains(tt.args, "keda") {
+				// keda requires at least one trigger to be declared explicitly.
+				f.Deployer = keda.KedaDeployerName
+				f.Deploy.Options.Scale = &fn.ScaleOptions{
+					KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "http"}}},
+				}
+				if err := f.Write(); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			builder := mock.NewBuilder()
@@ -2958,7 +2983,7 @@ func TestDeploy_ExposeIgnoredByDeployerNote(t *testing.T) {
 			var stderr strings.Builder
 			cmd.SetOut(&stderr)
 			cmd.SetErr(&stderr)
-			err := cmd.Execute()
+			err = cmd.Execute()
 
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
