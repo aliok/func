@@ -353,7 +353,15 @@ func TestDelete_ByProjectClearsDeployedMarker(t *testing.T) {
 		Runtime:  "go",
 		Registry: TestRegistry,
 		Deployer: keda.KedaDeployerName, // intent - how to deploy
-		Deploy:   fn.DeploySpec{Namespace: "myns", Deployer: keda.KedaDeployerName},
+		Deploy: fn.DeploySpec{
+			Namespace: "myns",
+			Deployer:  keda.KedaDeployerName,
+			Options: fn.Options{
+				Scale: &fn.ScaleOptions{
+					KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "http"}}},
+				},
+			},
+		},
 	}
 	f, err := fn.New().Init(f)
 	if err != nil {
@@ -441,7 +449,16 @@ func TestDelete_ByNameLeavesLocalFunctionUntouched(t *testing.T) {
 // after removal keeps the INTENT deployer intact and functional.
 func TestDelete_ByProjectPreservesDeployerForRedeploy(t *testing.T) {
 	root := FromTempDirectory(t)
-	if _, err := fn.New().Init(fn.Function{Runtime: "go", Root: root, Registry: TestRegistry}); err != nil {
+	f, err := fn.New().Init(fn.Function{Runtime: "go", Root: root, Registry: TestRegistry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// keda requires at least one trigger to be declared explicitly.
+	f.Deployer = keda.KedaDeployerName
+	f.Deploy.Options.Scale = &fn.ScaleOptions{
+		KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "http"}}},
+	}
+	if err := f.Write(); err != nil {
 		t.Fatal(err)
 	}
 
