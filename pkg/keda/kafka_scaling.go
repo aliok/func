@@ -36,11 +36,17 @@ func triggerAuthName(funcName string) string {
 	return funcName + "-kafka-auth"
 }
 
+// triggers returns the function's explicitly configured KEDA triggers, or a
+// plain http trigger when none are configured at all. This only matters for
+// callers of Deploy that bypass fn.Function.Validate (which requires
+// deployer: keda to declare triggers explicitly) -- e.g. tests and other
+// direct API consumers. It never infers a kafka trigger: that decision is
+// never made silently, on any path.
 func triggers(f fn.Function) []fn.KEDATrigger {
 	if f.Deploy.Options.Scale != nil && f.Deploy.Options.Scale.KEDA != nil {
 		return f.Deploy.Options.Scale.KEDA.Triggers
 	}
-	return nil
+	return []fn.KEDATrigger{{Type: "http"}}
 }
 
 func hasHTTPTrigger(triggers []fn.KEDATrigger) bool {
