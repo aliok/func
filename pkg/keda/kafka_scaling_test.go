@@ -13,8 +13,8 @@ import (
 func TestTriggers_NoScale(t *testing.T) {
 	f := fn.Function{Name: "test"}
 	got := triggers(f)
-	if got != nil {
-		t.Errorf("expected nil, got %v", got)
+	if len(got) != 1 || got[0].Type != "http" {
+		t.Errorf("expected [http] fallback, got %v", got)
 	}
 }
 
