@@ -103,7 +103,7 @@ type Function struct {
 	// Deployer with which to deploy the Function: the requested (intended)
 	// deployer. This is the user's choice and persists across undeploy.
 	// The deployer a Function is CURRENTLY deployed with is recorded separately
-	// in .Deploy.Deployer, which is cleared on undeploy.
+	// in .Deploy.ActiveDeployer, which is cleared on undeploy.
 	Deployer string `yaml:"deployer,omitempty" jsonschema:"enum=knative,enum=raw,enum=keda"`
 
 	// Expose is the requested (intended) external exposure mode for the raw
@@ -111,7 +111,7 @@ type Function struct {
 	// Values: "route" (OpenShift Route; OpenShift only), "none" (cluster-local).
 	// Empty means cluster-local. Persists across undeploy like Deployer.
 	// The mode CURRENTLY applied on the cluster is recorded separately in
-	// .Deploy.Expose, which is cleared on undeploy.
+	// .Deploy.ActiveExpose, which is cleared on undeploy.
 	Expose string `yaml:"expose,omitempty" jsonschema:"enum=route,enum=none,enum="`
 
 	// Created time is the moment that creation was successfully completed
@@ -336,10 +336,10 @@ type DeploySpec struct {
 	// More info: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
 	ImagePullSecret string `yaml:"imagePullSecret,omitempty"`
 
-	// Deployer records the deployer the Function is CURRENTLY DEPLOYED:
-	// observed state, written after successful deployment, and cleared on
-	// undeploy alongside Namespace.
-	Deployer string `yaml:"deployer,omitempty" jsonschema:"enum=knative,enum=raw,enum=keda"`
+	// ActiveDeployer records the deployer the Function is CURRENTLY DEPLOYED
+	// with: observed state, written after successful deployment, and cleared
+	// on undeploy alongside Namespace. User intent lives on Function.Deployer.
+	ActiveDeployer string `yaml:"deployer,omitempty" jsonschema:"enum=knative,enum=raw,enum=keda"`
 
 	Subscriptions []KnativeSubscription `yaml:"subscriptions,omitempty"`
 
@@ -348,11 +348,12 @@ type DeploySpec struct {
 	// the function is managed by default when the func-operator is installed.
 	ManagementDisabled bool `yaml:"managementDisabled,omitempty"`
 
-	// Expose records the external exposure mode CURRENTLY applied on the
-	// cluster for raw/keda (observed state). Written after successful deploy,
-	// cleared on undeploy alongside Namespace and Deployer. Empty means
-	// cluster-local (or never exposed). User intent lives on Function.Expose.
-	Expose string `yaml:"expose,omitempty" jsonschema:"enum=route,enum=none,enum="`
+	// ActiveExpose records the external exposure mode CURRENTLY applied on
+	// the cluster for raw/keda (observed state). Written after successful
+	// deploy, cleared on undeploy alongside Namespace and ActiveDeployer.
+	// Empty means cluster-local (or never exposed). User intent lives on
+	// Function.Expose.
+	ActiveExpose string `yaml:"expose,omitempty" jsonschema:"enum=route,enum=none,enum="`
 }
 
 // HealthEndpoints specify the liveness and readiness endpoints for a Runtime
@@ -483,7 +484,7 @@ func (f Function) Validate() error {
 		ValidateLabels(f.Deploy.Labels),
 		validateGit(f.Build.Git),
 		validateKafka(f.Run.Kafka, f.Invoke, f.Runtime),
-		validateExpose(f.Deploy.Expose, f.Expose),
+		validateExpose(f.Deploy.ActiveExpose, f.Expose),
 	}
 
 	var b strings.Builder

@@ -159,7 +159,7 @@ func deploy(ctx context.Context) error {
 	// honors --deployer, which travels in func.yaml as intent.
 	deployer := f.Deployer
 	if deployer == "" {
-		deployer = f.Deploy.Deployer
+		deployer = f.Deploy.ActiveDeployer
 	}
 	if deployer == "" {
 		deployer = knative.KnativeDeployerName

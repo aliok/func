@@ -37,7 +37,7 @@ func NewDeployer() *Deployer {
 			if f.Deployer != "" {
 				result.Deployer = f.Deployer // deployed with that requested
 			} else {
-				result.Deployer = f.Deploy.Deployer // redeploy with current
+				result.Deployer = f.Deploy.ActiveDeployer // redeploy with current
 			}
 			// Observed exposure mirrors intent when active (same as real deployers).
 			if fn.ActiveExpose(f.Expose) {

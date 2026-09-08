@@ -879,7 +879,7 @@ func (c *Client) Deploy(ctx context.Context, f Function, oo ...DeployOption) (Fu
 	// and expect the user to undeploy first, which removes the resources
 	// correctly.
 	if f.Deploy.Namespace != "" {
-		if err := deployers.ValidateSwitch(f.Deploy.Deployer, f.Deployer); err != nil {
+		if err := deployers.ValidateSwitch(f.Deploy.ActiveDeployer, f.Deployer); err != nil {
 			return f, fmt.Errorf("function %q: %w", f.Name, err)
 		}
 	}
@@ -924,8 +924,8 @@ func (c *Client) Deploy(ctx context.Context, f Function, oo ...DeployOption) (Fu
 	}
 	// Update the function to reflect the new deployed state of the Function
 	f.Deploy.Namespace = result.Namespace
-	f.Deploy.Deployer = result.Deployer
-	f.Deploy.Expose = result.Expose
+	f.Deploy.ActiveDeployer = result.Deployer
+	f.Deploy.ActiveExpose = result.Expose
 
 	// Raw/keda with a nil exposer (library) applied nothing. Knative ignores
 	// expose by design; the CLI already warned.
@@ -1184,7 +1184,7 @@ func (c *Client) List(ctx context.Context, namespace string) ([]ListItem, error)
 // in which case empty namespace is accepted because its existence is checked
 // in the sub functions remover.Remove and pipelines.Remove.
 //
-// Returns structure 'f' with f.Deploy.Namespace & f.Deploy.Deployer cleared if
+// Returns structure 'f' with f.Deploy.Namespace & f.Deploy.ActiveDeployer cleared if
 // the removal was successful and error returned is nil. If error was
 // encountered, returns 'f' unmodified.
 func (c *Client) Remove(ctx context.Context, name, namespace string, f Function, all bool) (Function, error) {
@@ -1265,8 +1265,8 @@ func (c *Client) Remove(ctx context.Context, name, namespace string, f Function,
 		// Function.Deployer, Function.Expose, Function.Namespace) is untouched
 		// and is what a subsequent deploy reuses.
 		f.Deploy.Namespace = ""
-		f.Deploy.Deployer = ""
-		f.Deploy.Expose = ""
+		f.Deploy.ActiveDeployer = ""
+		f.Deploy.ActiveExpose = ""
 	}
 	return f, combinedErr
 }

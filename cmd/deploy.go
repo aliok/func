@@ -306,8 +306,8 @@ func runDeploy(cmd *cobra.Command, newClient ClientFactory) (err error) {
 
 	// Back-compat: a function deployed before the deployer was recorded has a
 	// namespace but no deployer, which historically could only mean knative.
-	if f.Deploy.Namespace != "" && f.Deploy.Deployer == "" {
-		f.Deploy.Deployer = deployers.Knative
+	if f.Deploy.Namespace != "" && f.Deploy.ActiveDeployer == "" {
+		f.Deploy.ActiveDeployer = deployers.Knative
 	}
 
 	if f, err = cfg.Configure(f); err != nil { // Updates f with deploy cfg
@@ -368,7 +368,7 @@ func runDeploy(cmd *cobra.Command, newClient ClientFactory) (err error) {
 		var url string
 		// Invoke a remote build/push/deploy pipeline
 		// Returned is the function with fields like Registry, f.Deploy.Image &
-		// f.Deploy.Namespace, f.Deploy.Expose populated.
+		// f.Deploy.Namespace, f.Deploy.ActiveExpose populated.
 		if url, f, err = client.RunPipeline(cmd.Context(), f); err != nil {
 			return wrapDeploymentError(err)
 		}
@@ -377,7 +377,7 @@ func runDeploy(cmd *cobra.Command, newClient ClientFactory) (err error) {
 		// After a remote pipeline: intent was active, describer saw no
 		// applied expose. Typical cause is a func-util image that predates
 		// this field. Knative is excluded; it never applies expose.
-		if fn.ExposureRecordMissing(f.Expose, f.Deploy.Expose, f.Deploy.Deployer) {
+		if fn.ExposureRecordMissing(f.Expose, f.Deploy.ActiveExpose, f.Deploy.ActiveDeployer) {
 			fmt.Fprintf(cmd.OutOrStderr(), "Warning: expose %q was requested but the cluster's "+
 				"func-util image applied no external exposure; the function is running cluster-local\n", f.Expose)
 		}

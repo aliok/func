@@ -355,7 +355,7 @@ func TestDelete_ByProjectClearsDeployedMarker(t *testing.T) {
 		Deployer: keda.KedaDeployerName, // intent - how to deploy
 		Deploy: fn.DeploySpec{
 			Namespace: "myns",
-			Deployer:  keda.KedaDeployerName,
+			ActiveDeployer: keda.KedaDeployerName,
 			Options: fn.Options{
 				Scale: &fn.ScaleOptions{
 					KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "http"}}},
@@ -390,8 +390,8 @@ func TestDelete_ByProjectClearsDeployedMarker(t *testing.T) {
 	if loaded.Deploy.Namespace != "" {
 		t.Fatalf("expected Deploy.Namespace cleared after a successful undeploy, got %q", loaded.Deploy.Namespace)
 	}
-	if loaded.Deploy.Deployer != "" {
-		t.Fatalf("expected Deploy.Deployer cleared after a successful undeploy, got %q", loaded.Deploy.Deployer)
+	if loaded.Deploy.ActiveDeployer != "" {
+		t.Fatalf("expected Deploy.Deployer cleared after a successful undeploy, got %q", loaded.Deploy.ActiveDeployer)
 	}
 	if loaded.Deployer != keda.KedaDeployerName {
 		t.Fatalf("expected the intended Deployer preserved as a remembered choice, got %q", loaded.Deployer)
@@ -409,7 +409,7 @@ func TestDelete_ByNameLeavesLocalFunctionUntouched(t *testing.T) {
 		Runtime:  "go",
 		Registry: TestRegistry,
 		Name:     "localfn",
-		Deploy:   fn.DeploySpec{Namespace: "myns", Deployer: keda.KedaDeployerName},
+		Deploy:   fn.DeploySpec{Namespace: "myns", ActiveDeployer: keda.KedaDeployerName},
 	}
 	f, err := fn.New().Init(f)
 	if err != nil {
@@ -493,8 +493,8 @@ func TestDelete_ByProjectPreservesDeployerForRedeploy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Deploy.Deployer != keda.KedaDeployerName {
-		t.Fatalf("expected the flag-less redeploy to reuse the persisted %q deployer, got %q", keda.KedaDeployerName, loaded.Deploy.Deployer)
+	if loaded.Deploy.ActiveDeployer != keda.KedaDeployerName {
+		t.Fatalf("expected the flag-less redeploy to reuse the persisted %q deployer, got %q", keda.KedaDeployerName, loaded.Deploy.ActiveDeployer)
 	}
 }
 
@@ -507,7 +507,7 @@ func TestDelete_ByProjectThenRedeployWithDifferentDeployerNotBlocked(t *testing.
 		Root:     root,
 		Runtime:  "go",
 		Registry: TestRegistry,
-		Deploy:   fn.DeploySpec{Namespace: "myns", Deployer: keda.KedaDeployerName},
+		Deploy:   fn.DeploySpec{Namespace: "myns", ActiveDeployer: keda.KedaDeployerName},
 	}
 	f, err := fn.New().Init(f)
 	if err != nil {

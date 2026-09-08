@@ -113,7 +113,7 @@ func NewPipelinesProvider(opts ...Opt) *PipelinesProvider {
 // definition, sending it to the cluster to be run via Tekton.
 // Progress is by default piped to stdtout.
 // Returned is the final url, and the input Function with the final results of the run populated
-// (f.Deploy.Image, f.Deploy.Namespace, f.Deploy.Deployer and f.Deploy.Expose)
+// (f.Deploy.Image, f.Deploy.Namespace, f.Deploy.ActiveDeployer and f.Deploy.ActiveExpose)
 // or an error.
 func (pp *PipelinesProvider) Run(ctx context.Context, f fn.Function) (string, fn.Function, error) {
 	var err error
@@ -152,15 +152,15 @@ func (pp *PipelinesProvider) Run(ctx context.Context, f fn.Function) (string, fn
 	f.Deploy.Image = image
 
 	// Deployer is either the intended deployer (f.Deployer) or the one it was
-	// last deployed with (f.Deploy.Deployer). Recorded so a remote deploy is
+	// last deployed with (f.Deploy.ActiveDeployer). Recorded so a remote deploy is
 	// remembered in func.yaml, mirroring Namespace and Image above.
 	deployer := f.Deployer
 	if deployer == "" {
-		deployer = f.Deploy.Deployer
+		deployer = f.Deploy.ActiveDeployer
 	}
-	f.Deploy.Deployer = deployer
+	f.Deploy.ActiveDeployer = deployer
 
-	// Applied exposure (f.Deploy.Expose) is deliberately NOT derived from intent
+	// Applied exposure (f.Deploy.ActiveExpose) is deliberately NOT derived from intent
 	// here: the pipeline runs a published func-util image this build does not
 	// compile, so what it did with expose is established by looking. Recorded
 	// after the run from the describer, which reads the annotation the on-cluster
@@ -273,7 +273,7 @@ func (pp *PipelinesProvider) Run(ctx context.Context, f fn.Function) (string, fn
 	}
 
 	var describer fn.Describer
-	switch f.Deploy.Deployer {
+	switch f.Deploy.ActiveDeployer {
 	case k8s.KubernetesDeployerName:
 		describer = k8s.NewDescriber(false, k8s.WithDescriberTransport(pp.transport))
 	case keda.KedaDeployerName:
@@ -287,7 +287,7 @@ func (pp *PipelinesProvider) Run(ctx context.Context, f fn.Function) (string, fn
 	if err != nil {
 		return "", f, fmt.Errorf("problem in retrieving status of deployed function: %v", err)
 	}
-	f.Deploy.Expose = obj.Expose
+	f.Deploy.ActiveExpose = obj.Expose
 
 	verb := "deployed"
 	if obj.Generation != 1 {

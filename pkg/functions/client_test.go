@@ -1277,7 +1277,7 @@ func TestClient_Remove_ReturnsReconciledFunction(t *testing.T) {
 		return fn.Function{
 			Name:     "fn",
 			Deployer: deployer,                                           // intent
-			Deploy:   fn.DeploySpec{Namespace: "ns", Deployer: deployer}, // state
+			Deploy:   fn.DeploySpec{Namespace: "ns", ActiveDeployer: deployer}, // state
 		}
 	}
 
@@ -1295,8 +1295,8 @@ func TestClient_Remove_ReturnsReconciledFunction(t *testing.T) {
 		if got.Deploy.Namespace != "" {
 			t.Fatalf("expected Deploy.Namespace cleared on success, got %q", got.Deploy.Namespace)
 		}
-		if got.Deploy.Deployer != "" {
-			t.Fatalf("expected Deploy.Deployer cleared on success, got %q", got.Deploy.Deployer)
+		if got.Deploy.ActiveDeployer != "" {
+			t.Fatalf("expected Deploy.Deployer cleared on success, got %q", got.Deploy.ActiveDeployer)
 		}
 		// keeps the intent
 		if got.Deployer != deployer {
@@ -1318,8 +1318,8 @@ func TestClient_Remove_ReturnsReconciledFunction(t *testing.T) {
 		if got.Deploy.Namespace != "ns" {
 			t.Fatalf("expected Deploy.Namespace preserved on failure, got %q", got.Deploy.Namespace)
 		}
-		if got.Deploy.Deployer != deployer {
-			t.Fatalf("expected Deploy.Deployer untouched on failure, got %q", got.Deploy.Deployer)
+		if got.Deploy.ActiveDeployer != deployer {
+			t.Fatalf("expected Deploy.Deployer untouched on failure, got %q", got.Deploy.ActiveDeployer)
 		}
 		if got.Deployer != deployer {
 			t.Fatalf("expected the intended Deployer untouched on failure, got %q", got.Deployer)
@@ -2678,7 +2678,7 @@ func TestClient_Deploy_BlocksDeployerSwitch(t *testing.T) {
 				Deployer:  tt.requested,
 				Deploy: fn.DeploySpec{
 					Namespace: tt.deployedNS,
-					Deployer:  tt.deployedWith,
+					ActiveDeployer: tt.deployedWith,
 				},
 			}
 
@@ -2729,8 +2729,8 @@ func TestClient_Deploy_PersistsSelfReportedDeployer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if f.Deploy.Deployer != reported {
-		t.Fatalf("expected the self-reported deployer %q persisted as state, got %q", reported, f.Deploy.Deployer)
+	if f.Deploy.ActiveDeployer != reported {
+		t.Fatalf("expected the self-reported deployer %q persisted as state, got %q", reported, f.Deploy.ActiveDeployer)
 	}
 	if f.Deployer != deployers.Knative {
 		t.Fatalf("expected the requested deployer %q preserved as intent, got %q", deployers.Knative, f.Deployer)
