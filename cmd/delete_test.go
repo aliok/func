@@ -354,13 +354,11 @@ func TestDelete_ByProjectClearsDeployedMarker(t *testing.T) {
 		Registry: TestRegistry,
 		Deployer: keda.KedaDeployerName, // intent - how to deploy
 		Deploy: fn.DeploySpec{
-			Namespace: "myns",
+			Namespace:      "myns",
 			ActiveDeployer: keda.KedaDeployerName,
-			Options: fn.Options{
-				Scale: &fn.ScaleOptions{
-					KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "http"}}},
-				},
-			},
+		},
+		Scale: &fn.ScaleOptions{
+			KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "http"}}},
 		},
 	}
 	f, err := fn.New().Init(f)
@@ -455,7 +453,7 @@ func TestDelete_ByProjectPreservesDeployerForRedeploy(t *testing.T) {
 	}
 	// keda requires at least one trigger to be declared explicitly.
 	f.Deployer = keda.KedaDeployerName
-	f.Deploy.Options.Scale = &fn.ScaleOptions{
+	f.Scale = &fn.ScaleOptions{
 		KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "http"}}},
 	}
 	if err := f.Write(); err != nil {

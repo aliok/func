@@ -1,0 +1,109 @@
+package functions
+
+import "fmt"
+
+// ValidateScale validates the top-level scale configuration against the chosen
+// deployer and Kafka config. It replaces the previous validateScaleDeployer,
+// validateKEDAScale, and validateKPAScale functions with a single entry point.
+func ValidateScale(scale *ScaleOptions, deployer string, kafka *KafkaConfig) (errors []string) {
+	if deployer == "keda" && (scale == nil || scale.KEDA == nil || len(scale.KEDA.Triggers) == 0) {
+		errors = append(errors, "deployer keda requires at least one trigger in scale.keda.triggers")
+	}
+	if scale == nil {
+		return
+	}
+
+	if scale.Min != nil && *scale.Min < 0 {
+		errors = append(errors, fmt.Sprintf("scale.min has invalid value: %d, must be >= 0", *scale.Min))
+	}
+	if scale.Max != nil && *scale.Max < 0 {
+		errors = append(errors, fmt.Sprintf("scale.max has invalid value: %d, must be >= 0", *scale.Max))
+	}
+	if scale.Min != nil && scale.Max != nil && *scale.Max < *scale.Min {
+		errors = append(errors, "scale.max must be >= scale.min")
+	}
+
+	if scale.KEDA != nil && scale.KPA != nil {
+		errors = append(errors, "scale.keda and scale.kpa are mutually exclusive")
+		return
+	}
+	if scale.KEDA != nil && deployer != "keda" {
+		errors = append(errors, "scale.keda requires deployer: keda")
+	}
+	if scale.KPA != nil && deployer != "knative" && deployer != "" {
+		errors = append(errors, "scale.kpa requires deployer: knative")
+	}
+
+	if scale.KEDA != nil {
+		errors = append(errors, validateKEDAScale(scale.KEDA, kafka)...)
+	}
+	if scale.KPA != nil {
+		errors = append(errors, validateKPAScale(scale.KPA)...)
+	}
+
+	return
+}
+
+func validateKEDAScale(keda *KEDAScaleOptions, kafka *KafkaConfig) (errors []string) {
+	if len(keda.Triggers) == 0 {
+		errors = append(errors, "scale.keda.triggers must not be empty when scale.keda is set")
+		return
+	}
+
+	if keda.PollingInterval != nil && *keda.PollingInterval < 1 {
+		errors = append(errors, "scale.keda.pollingInterval must be >= 1")
+	}
+	if keda.CooldownPeriod != nil && *keda.CooldownPeriod < 1 {
+		errors = append(errors, "scale.keda.cooldownPeriod must be >= 1")
+	}
+
+	for i, t := range keda.Triggers {
+		switch t.Type {
+		case "http":
+			if t.TargetValue != nil && *t.TargetValue < 1 {
+				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].targetValue must be >= 1", i))
+			}
+		case "kafka":
+			if kafka == nil {
+				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d] has type kafka but run.kafka is not configured", i))
+			}
+			if t.LagThreshold != nil && *t.LagThreshold < 1 {
+				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].lagThreshold must be >= 1", i))
+			}
+			if t.ActivationLagThreshold != nil && *t.ActivationLagThreshold < 0 {
+				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].activationLagThreshold must not be negative", i))
+			}
+		case "cron":
+			if t.Timezone == "" {
+				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].timezone is required for cron triggers", i))
+			}
+			if t.Start == "" {
+				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].start is required for cron triggers", i))
+			}
+			if t.End == "" {
+				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].end is required for cron triggers", i))
+			}
+			if t.DesiredReplicas == nil {
+				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].desiredReplicas is required for cron triggers", i))
+			} else if *t.DesiredReplicas < 1 {
+				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].desiredReplicas must be >= 1", i))
+			}
+		default:
+			errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].type has invalid value %q, allowed: http, kafka, cron", i, t.Type))
+		}
+	}
+	return
+}
+
+func validateKPAScale(kpa *KPAScaleOptions) (errors []string) {
+	if kpa.Metric != nil && *kpa.Metric != "concurrency" && *kpa.Metric != "rps" {
+		errors = append(errors, fmt.Sprintf("scale.kpa.metric has invalid value: %s, allowed: concurrency, rps", *kpa.Metric))
+	}
+	if kpa.Target != nil && *kpa.Target < 0.01 {
+		errors = append(errors, fmt.Sprintf("scale.kpa.target must be >= 0.01, got %f", *kpa.Target))
+	}
+	if kpa.Utilization != nil && (*kpa.Utilization < 1 || *kpa.Utilization > 100) {
+		errors = append(errors, fmt.Sprintf("scale.kpa.utilization must be 1-100, got %f", *kpa.Utilization))
+	}
+	return
+}

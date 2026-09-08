@@ -40,7 +40,7 @@ build:
 The type of deployment to use when deploying the function. Possible values are:
 - `knative` (default): deploys a Knative Service, scaled by Knative's KPA (Knative Pod Autoscaler).
 - `raw`: deploys a plain Kubernetes Deployment with a static replica count.
-- `keda`: deploys a plain Kubernetes Deployment scaled by [KEDA](https://keda.sh), based on triggers such as incoming HTTP traffic or Kafka consumer lag. See [`options.scale.keda`](#options) below.
+- `keda`: deploys a plain Kubernetes Deployment scaled by [KEDA](https://keda.sh), based on triggers such as incoming HTTP traffic or Kafka consumer lag. See [`scale.keda`](#scale) below.
 
 ```yaml
 deployer: keda
@@ -142,26 +142,42 @@ must exist in the namespace to succeed.
 
 More info: https://k8s.io/docs/tasks/configure-pod-container/configure-service-account
 
+### `scale`
+
+Top-level autoscaling configuration. Settings are deployer-aware: `kpa` is used with `deployer: knative`, `keda` with `deployer: keda`. `min`/`max` are shared across all deployers.
+
+- `min`: Minimum number of replicas. Non-negative integer, default is 0. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/scale-bounds/#lower-bound).
+- `max`: Maximum number of replicas. Non-negative integer, default is 0 (no limit). See related [Knative docs](https://knative.dev/docs/serving/autoscaling/scale-bounds/#upper-bound).
+- `kpa`: Knative Pod Autoscaler config, used only with `deployer: knative`.
+  - `metric`: metric type watched by the autoscaler: `concurrency` (default) or `rps`. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/autoscaling-metrics/).
+  - `target`: target value for the metric. Defaults to `options.resources.limits.concurrency` when given. Float >= 0.01, default is 100. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/concurrency/#soft-limit).
+  - `utilization`: target utilization percentage before scaling up. Float 1-100, default is 70. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/concurrency/#target-utilization).
+- `keda`: KEDA-specific scaling config, required when `deployer: keda`.
+  - `pollingInterval`: how often KEDA checks triggers, in seconds. Default is 30.
+  - `cooldownPeriod`: seconds to wait after the last trigger fires before scaling to min. Default is 300.
+  - `triggers`: a list of KEDA triggers. At least one is required. Each trigger has a `type` of `http`, `kafka`, or `cron`:
+    - `http`: scales based on incoming HTTP request rate.
+      - `targetValue`: requests per second per replica before scaling up. Default is 100.
+    - `kafka`: scales based on consumer group lag. Requires [`run.kafka`](#runkafka) to be configured.
+      - `lagThreshold`: average consumer lag per partition that triggers scaling up. Default is 10.
+      - `activationLagThreshold`: lag below which KEDA keeps replicas at 0 when `scale.min` is 0. Default is 0.
+    - `cron`: scales based on a time window.
+      - `timezone`: e.g. `Europe/Istanbul`.
+      - `start`, `end`: cron expressions defining the active window, e.g. `0 8 * * *`.
+      - `desiredReplicas`: number of replicas to scale to during the active window.
+
+```yaml
+scale:
+  min: 0
+  max: 10
+  kpa:
+    metric: concurrency
+    target: 75
+    utilization: 75
+```
+
 ### `options`
-Options allows you to set specific configuration for the deployed function, allowing you to tweak Knative Service options related to autoscaling and other properties. If these options are not set, the Knative defaults will be used.
-- `scale`
-  - `min`: Minimum number of replicas. Must me non-negative integer, default is 0. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/scale-bounds/#lower-bound).
-  - `max`: Maximum number of replicas. Must me non-negative integer, default is 0 - meaning no limit. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/scale-bounds/#upper-bound).
-  - `metric`: Defines which metric type is watched by the Autoscaler. Could be `concurrency` (default) or `rps`. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/autoscaling-metrics/).
-  - `target`: Recommendation for when to scale up based on the concurrent number of incoming request. Defaults to `options.resources.limits.concurrency` when given. Can be float value greater than 0.01, default is 100. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/concurrency/#soft-limit).
-  - `utilization`: Percentage of concurrent requests utilization before scaling up. Can be float value between 1 and 100, default is 70. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/concurrency/#target-utilization).
-  - `kpa`: Knative-specific autoscaling config, used only with `deployer: knative`. Alternative location for `metric`, `target` and `utilization` above, kept separate so KPA-specific settings don't get confused with KEDA's.
-    - `metric`, `target`, `utilization`: same meaning as above.
-  - `keda`: KEDA-specific scaling config, required when `deployer: keda`.
-    - `triggers`: a list of KEDA triggers. At least one is required. Each trigger has a `type` of `http`, `kafka`, or `cron`:
-      - `http`: scales based on incoming HTTP request rate. No additional fields.
-      - `kafka`: scales based on consumer group lag. Requires [`run.kafka`](#runkafka) to be configured.
-        - `lagThreshold`: average consumer lag per partition that triggers scaling up. Default is 10.
-        - `activationLagThreshold`: lag below which KEDA keeps replicas at 0 when `scale.min` is 0. Default is 0.
-      - `cron`: scales based on a time window.
-        - `timezone`: e.g. `Europe/Istanbul`.
-        - `start`, `end`: cron expressions defining the active window, e.g. `0 8 * * *`.
-        - `desiredReplicas`: number of replicas to scale to during the active window.
+Options allows you to set resource limits and requests for the deployed function container.
 - `resources`
   - `requests`
     - `cpu`: A CPU resource request for the container with deployed function. See related [Kubernetes docs](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#requests-and-limits).
@@ -172,50 +188,46 @@ Options allows you to set specific configuration for the deployed function, allo
     - `concurrency`: Hard Limit of concurrent requests to be processed by a single replica. Can be integer value greater than or equal to 0, default is 0 - meaning no limit. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/concurrency/#hard-limit).
 
 ```yaml
-options:
-  scale:
-    min: 0
-    max: 10
-    metric: concurrency
-    target: 75
-    utilization: 75
-  resources:
-    requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 1000m
-      memory: 256Mi
-      concurrency: 100
+deploy:
+  options:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 1000m
+        memory: 256Mi
+        concurrency: 100
 ```
 
 Example using `deployer: keda` with an HTTP trigger and a Kafka trigger:
 
 ```yaml
 deployer: keda
-options:
-  scale:
-    min: 0
-    max: 10
-    keda:
-      triggers:
-        - type: http
-        - type: kafka
-          lagThreshold: 5
-          activationLagThreshold: 0
+scale:
+  min: 0
+  max: 10
+  keda:
+    pollingInterval: 30
+    cooldownPeriod: 300
+    triggers:
+      - type: http
+        targetValue: 200
+      - type: kafka
+        lagThreshold: 5
+        activationLagThreshold: 0
 ```
 
 Example using `deployer: knative` with explicit KPA settings:
 
 ```yaml
 deployer: knative
-options:
-  scale:
-    min: 1
-    max: 10
-    kpa:
-      metric: concurrency
-      target: 50
+scale:
+  min: 1
+  max: 10
+  kpa:
+    metric: concurrency
+    target: 50
 ```
 
 ### `run.kafka`

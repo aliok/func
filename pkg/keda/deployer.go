@@ -172,6 +172,7 @@ func (d *Deployer) Deploy(ctx context.Context, f fn.Function) (fn.DeploymentResu
 			annotations: annotations,
 			minScale:    minScale,
 			maxScale:    maxScale,
+			scale:       f.Scale,
 		}
 
 		if d.exposer != nil && fn.ActiveExpose(f.Expose) {
@@ -259,6 +260,7 @@ type deployTarget struct {
 	annotations map[string]string
 	minScale    int32
 	maxScale    int32
+	scale       *fn.ScaleOptions
 }
 
 // bridgeHosts are the cluster-local names the HSO registers for f: requests
@@ -286,7 +288,7 @@ func (d *Deployer) deployExposed(ctx context.Context, t deployTarget) (string, e
 	}
 
 	hosts := append(bridgeHosts(t.ref), exposedHost)
-	if err := ensureHTTPScaledObject(ctx, t, hosts); err != nil {
+	if err := ensureHTTPScaledObject(ctx, t, hosts, t.scale); err != nil {
 		return "", fmt.Errorf("failed to ensure http scaled object exists: %w", err)
 	}
 
@@ -310,7 +312,7 @@ func (d *Deployer) deployExposed(ctx context.Context, t deployTarget) (string, e
 // effectively unexposed.
 func (d *Deployer) deployClusterLocal(ctx context.Context, t deployTarget) (string, error) {
 	hosts := bridgeHosts(t.ref)
-	if err := ensureHTTPScaledObject(ctx, t, hosts); err != nil {
+	if err := ensureHTTPScaledObject(ctx, t, hosts, t.scale); err != nil {
 		return "", fmt.Errorf("failed to ensure http scaled object exists: %w", err)
 	}
 
@@ -357,24 +359,39 @@ const (
 // deployers.
 func replicaBounds(f fn.Function) (min, max int32) {
 	min, max = defaultMinReplicas, defaultMaxReplicas
-	if scale := f.Deploy.Options.Scale; scale != nil {
-		if scale.Min != nil {
-			min = int32(*scale.Min)
+	if f.Scale != nil {
+		if f.Scale.Min != nil {
+			min = int32(*f.Scale.Min)
 		}
-		if scale.Max != nil {
-			max = int32(*scale.Max)
+		if f.Scale.Max != nil {
+			max = int32(*f.Scale.Max)
 		}
 	}
 	return
 }
 
-func httpScaledObject(t deployTarget, hosts []string) (*httpv1alpha1.HTTPScaledObject, error) {
+func httpScaledObject(t deployTarget, hosts []string, scale *fn.ScaleOptions) (*httpv1alpha1.HTTPScaledObject, error) {
 	deployment := t.deployment
 	service := t.appService
 	if len(service.Spec.Ports) == 0 {
 		return nil, fmt.Errorf("service %s has no ports defined", service.Name)
 	}
 
+	cooldown := int32(300)
+	targetValue := int64(100)
+	if scale != nil && scale.KEDA != nil {
+		if scale.KEDA.CooldownPeriod != nil {
+			cooldown = *scale.KEDA.CooldownPeriod
+		}
+		for _, trig := range scale.KEDA.Triggers {
+			if trig.Type == "http" && trig.TargetValue != nil {
+				targetValue = *trig.TargetValue
+				break
+			}
+		}
+	}
+
+	controllerTrue := true
 	return &httpv1alpha1.HTTPScaledObject{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        t.ref.FunctionName,
@@ -387,7 +404,7 @@ func httpScaledObject(t deployTarget, hosts []string) (*httpv1alpha1.HTTPScaledO
 					Kind:       "Deployment",
 					Name:       deployment.Name,
 					UID:        deployment.UID,
-					Controller: new(true),
+					Controller: &controllerTrue,
 				},
 			},
 		},
@@ -401,13 +418,13 @@ func httpScaledObject(t deployTarget, hosts []string) (*httpv1alpha1.HTTPScaledO
 				Port:       service.Spec.Ports[0].Port,
 			},
 			Replicas: &httpv1alpha1.ReplicaStruct{
-				Min: new(t.minScale),
-				Max: new(t.maxScale),
+				Min: &t.minScale,
+				Max: &t.maxScale,
 			},
-			CooldownPeriod: new(int32(300)),
+			CooldownPeriod: &cooldown,
 			ScalingMetric: &httpv1alpha1.ScalingMetricSpec{
 				Rate: &httpv1alpha1.RateMetricSpec{
-					TargetValue: 100,
+					TargetValue: int(targetValue),
 					Window: metav1.Duration{
 						Duration: time.Minute,
 					},
@@ -425,6 +442,7 @@ func interceptorBridgeServiceName(name string) string {
 }
 
 func interceptorBridgeService(ref deployer.ExposureRef, deployment *v1.Deployment) *corev1.Service {
+	controllerTrue := true
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      interceptorBridgeServiceName(ref.FunctionName),
@@ -435,7 +453,7 @@ func interceptorBridgeService(ref deployer.ExposureRef, deployment *v1.Deploymen
 					Kind:       "Deployment",
 					Name:       deployment.Name,
 					UID:        deployment.UID,
-					Controller: new(true),
+					Controller: &controllerTrue,
 				},
 			},
 		},
@@ -484,8 +502,8 @@ func ensureInterceptorBridgeService(ctx context.Context,
 	return nil
 }
 
-func ensureHTTPScaledObject(ctx context.Context, t deployTarget, hosts []string) error {
-	expected, err := httpScaledObject(t, hosts)
+func ensureHTTPScaledObject(ctx context.Context, t deployTarget, hosts []string, scale *fn.ScaleOptions) error {
+	expected, err := httpScaledObject(t, hosts, scale)
 	if err != nil {
 		return fmt.Errorf("failed to generate http scaled object: %w", err)
 	}

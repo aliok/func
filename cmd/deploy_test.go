@@ -2728,7 +2728,7 @@ func TestDeploy_DeployerSwitch(t *testing.T) {
 			}
 			if effectiveDeployer == keda.KedaDeployerName {
 				f.Deployer = keda.KedaDeployerName
-				f.Deploy.Options.Scale = &fn.ScaleOptions{
+				f.Scale = &fn.ScaleOptions{
 					KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "http"}}},
 				}
 			}
@@ -2965,7 +2965,7 @@ func TestDeploy_ExposeIgnoredByDeployerNote(t *testing.T) {
 			if slices.Contains(tt.args, "keda") {
 				// keda requires at least one trigger to be declared explicitly.
 				f.Deployer = keda.KedaDeployerName
-				f.Deploy.Options.Scale = &fn.ScaleOptions{
+				f.Scale = &fn.ScaleOptions{
 					KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "http"}}},
 				}
 				if err := f.Write(); err != nil {

@@ -2,6 +2,7 @@ package functions
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -317,25 +318,31 @@ func writeFunc(f Function, root string) error {
 	return os.WriteFile(root+"/func.yaml", bb, 0644)
 }
 
-func TestMigrateScaleKPA(t *testing.T) {
-	t.Run("flat fields move to kpa", func(t *testing.T) {
-		metric := "concurrency"
-		target := 100.0
-		utilization := 70.0
-		f := Function{
-			SpecVersion: "0.36.0",
-			Deploy: DeploySpec{
-				Options: Options{
-					Scale: &ScaleOptions{
-						Metric:      &metric,
-						Target:      &target,
-						Utilization: &utilization,
-					},
-				},
-			},
+func TestMigrateScaleToTopLevel(t *testing.T) {
+	t.Run("flat fields move to top-level scale.kpa", func(t *testing.T) {
+		root := t.TempDir()
+		// Write an old-format func.yaml with flat KPA fields under deploy.options.scale
+		funcYaml := `specVersion: "0.36.0"
+name: testfn
+runtime: go
+deploy:
+  options:
+    scale:
+      min: 1
+      max: 10
+      metric: concurrency
+      target: 100.0
+      utilization: 70.0
+`
+		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
+			t.Fatal(err)
 		}
 
-		migrated, err := migrateScaleKPA(f, migration{version: "0.37.0"})
+		f := Function{
+			SpecVersion: "0.36.0",
+			Root:        root,
+		}
+		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.37.0"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -343,109 +350,158 @@ func TestMigrateScaleKPA(t *testing.T) {
 		if migrated.SpecVersion != "0.37.0" {
 			t.Errorf("specVersion = %q, want 0.37.0", migrated.SpecVersion)
 		}
-		if migrated.Deploy.Options.Scale.KPA == nil {
-			t.Fatal("expected kpa to be populated")
+		if migrated.Scale == nil {
+			t.Fatal("expected top-level scale to be populated")
 		}
-		if *migrated.Deploy.Options.Scale.KPA.Metric != "concurrency" {
-			t.Errorf("kpa.metric = %q, want concurrency", *migrated.Deploy.Options.Scale.KPA.Metric)
+		if migrated.Scale.Min == nil || *migrated.Scale.Min != 1 {
+			t.Errorf("scale.min = %v, want 1", migrated.Scale.Min)
 		}
-		if *migrated.Deploy.Options.Scale.KPA.Target != 100.0 {
-			t.Errorf("kpa.target = %f, want 100", *migrated.Deploy.Options.Scale.KPA.Target)
+		if migrated.Scale.Max == nil || *migrated.Scale.Max != 10 {
+			t.Errorf("scale.max = %v, want 10", migrated.Scale.Max)
 		}
-		if *migrated.Deploy.Options.Scale.KPA.Utilization != 70.0 {
-			t.Errorf("kpa.utilization = %f, want 70", *migrated.Deploy.Options.Scale.KPA.Utilization)
+		if migrated.Scale.KPA == nil {
+			t.Fatal("expected scale.kpa to be populated from flat fields")
 		}
-		// Flat fields are preserved for backwards compatibility
-		if migrated.Deploy.Options.Scale.Metric == nil {
-			t.Error("expected flat metric to be preserved")
+		if *migrated.Scale.KPA.Metric != "concurrency" {
+			t.Errorf("scale.kpa.metric = %q, want concurrency", *migrated.Scale.KPA.Metric)
+		}
+		if *migrated.Scale.KPA.Target != 100.0 {
+			t.Errorf("scale.kpa.target = %f, want 100", *migrated.Scale.KPA.Target)
+		}
+		if *migrated.Scale.KPA.Utilization != 70.0 {
+			t.Errorf("scale.kpa.utilization = %f, want 70", *migrated.Scale.KPA.Utilization)
+		}
+		if migrated.Deploy.Options.Scale != nil {
+			t.Error("expected deploy.options.scale to be cleared")
 		}
 	})
 
 	t.Run("no-op when no scale fields", func(t *testing.T) {
-		f := Function{SpecVersion: "0.36.0"}
-		migrated, err := migrateScaleKPA(f, migration{version: "0.37.0"})
+		root := t.TempDir()
+		funcYaml := `specVersion: "0.36.0"
+name: testfn
+runtime: go
+`
+		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		f := Function{SpecVersion: "0.36.0", Root: root}
+		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.37.0"})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if migrated.SpecVersion != "0.37.0" {
 			t.Errorf("specVersion = %q, want 0.37.0", migrated.SpecVersion)
 		}
+		if migrated.Scale != nil {
+			t.Errorf("expected nil scale, got %+v", migrated.Scale)
+		}
 	})
 
-	t.Run("no-op when kpa already set", func(t *testing.T) {
-		metric := "rps"
-		f := Function{
-			SpecVersion: "0.36.0",
-			Deploy: DeploySpec{
-				Options: Options{
-					Scale: &ScaleOptions{
-						KPA: &KPAScaleOptions{Metric: &metric},
-					},
-				},
-			},
+	t.Run("preserves kpa sub-key when already set", func(t *testing.T) {
+		root := t.TempDir()
+		funcYaml := `specVersion: "0.36.0"
+name: testfn
+runtime: go
+deploy:
+  options:
+    scale:
+      kpa:
+        metric: rps
+`
+		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
+			t.Fatal(err)
 		}
-		migrated, err := migrateScaleKPA(f, migration{version: "0.37.0"})
+
+		f := Function{SpecVersion: "0.36.0", Root: root}
+		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.37.0"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if *migrated.Deploy.Options.Scale.KPA.Metric != "rps" {
-			t.Errorf("kpa.metric = %q, want rps (should not be overwritten)", *migrated.Deploy.Options.Scale.KPA.Metric)
+		if migrated.Scale == nil || migrated.Scale.KPA == nil {
+			t.Fatal("expected scale.kpa to be preserved")
+		}
+		if *migrated.Scale.KPA.Metric != "rps" {
+			t.Errorf("scale.kpa.metric = %q, want rps", *migrated.Scale.KPA.Metric)
 		}
 	})
 
 	t.Run("keda deployer gets http trigger", func(t *testing.T) {
-		f := Function{
-			SpecVersion: "0.36.0",
-			Deployer:    "keda",
+		root := t.TempDir()
+		funcYaml := `specVersion: "0.36.0"
+name: testfn
+runtime: go
+deployer: keda
+`
+		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
+			t.Fatal(err)
 		}
-		migrated, err := migrateScaleKPA(f, migration{version: "0.37.0"})
+
+		f := Function{SpecVersion: "0.36.0", Deployer: "keda", Root: root}
+		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.37.0"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if migrated.Deploy.Options.Scale == nil || migrated.Deploy.Options.Scale.KEDA == nil {
+		if migrated.Scale == nil || migrated.Scale.KEDA == nil {
 			t.Fatal("expected scale.keda to be populated")
 		}
-		triggers := migrated.Deploy.Options.Scale.KEDA.Triggers
+		triggers := migrated.Scale.KEDA.Triggers
 		if len(triggers) != 1 || triggers[0].Type != "http" {
 			t.Errorf("expected [{http}], got %v", triggers)
 		}
 	})
 
 	t.Run("keda deployer with existing triggers unchanged", func(t *testing.T) {
+		root := t.TempDir()
+		funcYaml := `specVersion: "0.36.0"
+name: testfn
+runtime: go
+deployer: keda
+deploy:
+  options:
+    scale:
+      keda:
+        triggers:
+          - type: kafka
+`
+		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+
 		f := Function{
 			SpecVersion: "0.36.0",
 			Deployer:    "keda",
-			Deploy: DeploySpec{
-				Options: Options{
-					Scale: &ScaleOptions{
-						KEDA: &KEDAScaleOptions{
-							Triggers: []KEDATrigger{{Type: "kafka"}},
-						},
-					},
-				},
-			},
+			Root:        root,
 		}
-		migrated, err := migrateScaleKPA(f, migration{version: "0.37.0"})
+		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.37.0"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		triggers := migrated.Deploy.Options.Scale.KEDA.Triggers
+		triggers := migrated.Scale.KEDA.Triggers
 		if len(triggers) != 1 || triggers[0].Type != "kafka" {
 			t.Errorf("expected [{kafka}], got %v", triggers)
 		}
 	})
 
 	t.Run("non-keda deployer no triggers added", func(t *testing.T) {
-		f := Function{
-			SpecVersion: "0.36.0",
-			Deployer:    "raw",
+		root := t.TempDir()
+		funcYaml := `specVersion: "0.36.0"
+name: testfn
+runtime: go
+deployer: raw
+`
+		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
+			t.Fatal(err)
 		}
-		migrated, err := migrateScaleKPA(f, migration{version: "0.37.0"})
+
+		f := Function{SpecVersion: "0.36.0", Deployer: "raw", Root: root}
+		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.37.0"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if migrated.Deploy.Options.Scale != nil {
-			t.Errorf("expected no scale options for raw deployer, got %v", migrated.Deploy.Options.Scale)
+		if migrated.Scale != nil {
+			t.Errorf("expected no scale for raw deployer, got %+v", migrated.Scale)
 		}
 	})
 }

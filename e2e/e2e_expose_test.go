@@ -73,10 +73,10 @@ func setKedaHTTPTrigger(t *testing.T, root string) {
 	// scale.keda requires deployer: keda, and this is written before the
 	// deploy command has a chance to set it from the --deployer flag.
 	f.Deployer = "keda"
-	if f.Deploy.Options.Scale == nil {
-		f.Deploy.Options.Scale = &fn.ScaleOptions{}
+	if f.Scale == nil {
+		f.Scale = &fn.ScaleOptions{}
 	}
-	f.Deploy.Options.Scale.KEDA = &fn.KEDAScaleOptions{
+	f.Scale.KEDA = &fn.KEDAScaleOptions{
 		Triggers: []fn.KEDATrigger{{Type: "http"}},
 	}
 	if err := f.Write(); err != nil {

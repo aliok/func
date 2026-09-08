@@ -99,7 +99,7 @@ var migrations = []migration{
 	{"0.34.0", migrateToSpecsStructure},
 	{"0.35.0", migrateFromInvokeStructure},
 	{"0.36.0", migratePersistentVolumeTypoFixup},
-	{"0.37.0", migrateScaleKPA},
+	{"0.37.0", migrateScaleToTopLevel},
 	// New Migrations Here.
 }
 
@@ -357,31 +357,77 @@ func migratePersistentVolumeTypoFixup(fn Function, m migration) (Function, error
 	return fn, nil
 }
 
-// migrateScaleKPA moves the flat metric/target/utilization fields under a kpa
-// sub-key so that scaler-specific config is organized by type.
-// The flat fields are kept alongside kpa for backwards compatibility with
-// older CLI versions that don't know about the kpa sub-key.
-func migrateScaleKPA(f Function, m migration) (Function, error) {
-	if f.Deploy.Options.Scale != nil {
-		hasKPAFields := f.Deploy.Options.Scale.Metric != nil ||
-			f.Deploy.Options.Scale.Target != nil ||
-			f.Deploy.Options.Scale.Utilization != nil
+// migrateScaleToTopLevel moves scale config from deploy.options.scale to the
+// top-level scale field. It also moves the flat metric/target/utilization
+// fields (from pre-0.37.0 func.yaml files) into the kpa sub-key.
+func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
+	// Read the on-disk func.yaml to capture the old flat KPA fields that no
+	// longer exist on ScaleOptions (Metric, Target, Utilization).
+	type oldScale struct {
+		Min         *int64            `yaml:"min,omitempty"`
+		Max         *int64            `yaml:"max,omitempty"`
+		Metric      *string           `yaml:"metric,omitempty"`
+		Target      *float64          `yaml:"target,omitempty"`
+		Utilization *float64          `yaml:"utilization,omitempty"`
+		KEDA        *KEDAScaleOptions `yaml:"keda,omitempty"`
+		KPA         *KPAScaleOptions  `yaml:"kpa,omitempty"`
+	}
+	type oldOptions struct {
+		Scale *oldScale `yaml:"scale,omitempty"`
+	}
+	type oldDeploy struct {
+		Options oldOptions `yaml:"options,omitempty"`
+	}
+	var disk struct {
+		Deploy oldDeploy    `yaml:"deploy,omitempty"`
+		Scale  *ScaleOptions `yaml:"scale,omitempty"`
+	}
 
-		if hasKPAFields && f.Deploy.Options.Scale.KPA == nil {
-			f.Deploy.Options.Scale.KPA = &KPAScaleOptions{
-				Metric:      f.Deploy.Options.Scale.Metric,
-				Target:      f.Deploy.Options.Scale.Target,
-				Utilization: f.Deploy.Options.Scale.Utilization,
-			}
+	if f.Root != "" {
+		bb, err := os.ReadFile(filepath.Join(f.Root, FunctionFile))
+		if err == nil {
+			_ = yaml.Unmarshal(bb, &disk)
 		}
 	}
 
-	if f.Deployer == "keda" {
-		if f.Deploy.Options.Scale == nil {
-			f.Deploy.Options.Scale = &ScaleOptions{}
+	old := disk.Deploy.Options.Scale
+
+	if old != nil {
+		newScale := &ScaleOptions{
+			Min:  old.Min,
+			Max:  old.Max,
+			KEDA: old.KEDA,
+			KPA:  old.KPA,
 		}
-		if f.Deploy.Options.Scale.KEDA == nil || len(f.Deploy.Options.Scale.KEDA.Triggers) == 0 {
-			f.Deploy.Options.Scale.KEDA = &KEDAScaleOptions{
+
+		hasFlat := old.Metric != nil || old.Target != nil || old.Utilization != nil
+		if hasFlat && newScale.KPA == nil {
+			newScale.KPA = &KPAScaleOptions{
+				Metric:      old.Metric,
+				Target:      old.Target,
+				Utilization: old.Utilization,
+			}
+		}
+
+		f.Scale = newScale
+	}
+
+	// If there was already a top-level scale in the file (shouldn't happen
+	// in practice, but be defensive), the on-disk value wins.
+	if disk.Scale != nil {
+		f.Scale = disk.Scale
+	}
+
+	// Clear the old location so it doesn't get serialized.
+	f.Deploy.Options.Scale = nil
+
+	// keda deployer without triggers: default to http
+	if f.Deployer == "keda" {
+		if f.Scale == nil {
+			f.Scale = &ScaleOptions{}
+		}
+		if f.Scale.KEDA == nil || len(f.Scale.KEDA.Triggers) == 0 {
+			f.Scale.KEDA = &KEDAScaleOptions{
 				Triggers: []KEDATrigger{{Type: "http"}},
 			}
 		}

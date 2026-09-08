@@ -22,14 +22,10 @@ func TestTriggers_Explicit(t *testing.T) {
 	lag := int64(5)
 	f := fn.Function{
 		Name: "test",
-		Deploy: fn.DeploySpec{
-			Options: fn.Options{
-				Scale: &fn.ScaleOptions{
-					KEDA: &fn.KEDAScaleOptions{
-						Triggers: []fn.KEDATrigger{
-							{Type: "kafka", LagThreshold: &lag},
-						},
-					},
+		Scale: &fn.ScaleOptions{
+			KEDA: &fn.KEDAScaleOptions{
+				Triggers: []fn.KEDATrigger{
+					{Type: "kafka", LagThreshold: &lag},
 				},
 			},
 		},

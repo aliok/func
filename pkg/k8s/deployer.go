@@ -673,8 +673,8 @@ func (d *Deployer) generateDeployment(f fn.Function, namespace string, labels, a
 	SetSecurityContext(&container)
 
 	replicas := int32(1)
-	if f.Deploy.Options.Scale != nil && f.Deploy.Options.Scale.Min != nil && *f.Deploy.Options.Scale.Min > 0 {
-		replicas = int32(*f.Deploy.Options.Scale.Min)
+	if f.Scale != nil && f.Scale.Min != nil && *f.Scale.Min > 0 {
+		replicas = int32(*f.Scale.Min)
 	}
 
 	deployment := &appsv1.Deployment{

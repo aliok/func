@@ -14,33 +14,6 @@ func Test_validateOptions(t *testing.T) {
 		errs    int
 	}{
 		{
-			"correct 'scale.metric' - concurrency",
-			Options{
-				Scale: &ScaleOptions{
-					Metric: ptr.String("concurrency"),
-				},
-			},
-			0,
-		},
-		{
-			"correct 'scale.metric' - rps",
-			Options{
-				Scale: &ScaleOptions{
-					Metric: ptr.String("rps"),
-				},
-			},
-			0,
-		},
-		{
-			"incorrect 'scale.metric'",
-			Options{
-				Scale: &ScaleOptions{
-					Metric: ptr.String("foo"),
-				},
-			},
-			1,
-		},
-		{
 			"correct 'scale.min'",
 			Options{
 				Scale: &ScaleOptions{
@@ -57,89 +30,6 @@ func Test_validateOptions(t *testing.T) {
 				},
 			},
 			0,
-		},
-		{
-			"correct  'scale.min' & 'scale.max'",
-			Options{
-				Scale: &ScaleOptions{
-					Min: ptr.Int64(0),
-					Max: ptr.Int64(10),
-				},
-			},
-			0,
-		},
-		{
-			"incorrect  'scale.min' & 'scale.max'",
-			Options{
-				Scale: &ScaleOptions{
-					Min: ptr.Int64(100),
-					Max: ptr.Int64(10),
-				},
-			},
-			1,
-		},
-		{
-			"incorrect 'scale.min' - negative value",
-			Options{
-				Scale: &ScaleOptions{
-					Min: ptr.Int64(-10),
-				},
-			},
-			1,
-		},
-		{
-			"incorrect 'scale.max' - negative value",
-			Options{
-				Scale: &ScaleOptions{
-					Max: ptr.Int64(-10),
-				},
-			},
-			1,
-		},
-		{
-			"correct 'scale.target'",
-			Options{
-				Scale: &ScaleOptions{
-					Target: ptr.Float64(50),
-				},
-			},
-			0,
-		},
-		{
-			"incorrect 'scale.target'",
-			Options{
-				Scale: &ScaleOptions{
-					Target: ptr.Float64(0),
-				},
-			},
-			1,
-		},
-		{
-			"correct 'scale.utilization'",
-			Options{
-				Scale: &ScaleOptions{
-					Utilization: ptr.Float64(50),
-				},
-			},
-			0,
-		},
-		{
-			"incorrect 'scale.utilization' - < 1",
-			Options{
-				Scale: &ScaleOptions{
-					Utilization: ptr.Float64(0),
-				},
-			},
-			1,
-		},
-		{
-			"incorrect 'scale.utilization' - > 100",
-			Options{
-				Scale: &ScaleOptions{
-					Utilization: ptr.Float64(110),
-				},
-			},
-			1,
 		},
 		{
 			"correct 'resources.requests.cpu'",
@@ -263,7 +153,7 @@ func Test_validateOptions(t *testing.T) {
 			1,
 		},
 		{
-			"correct all options",
+			"correct all resource options",
 			Options{
 				Resources: &ResourcesOptions{
 					Requests: &ResourcesRequestsOptions{
@@ -276,18 +166,11 @@ func Test_validateOptions(t *testing.T) {
 						Concurrency: ptr.Int64(10),
 					},
 				},
-				Scale: &ScaleOptions{
-					Min:         ptr.Int64(0),
-					Max:         ptr.Int64(10),
-					Metric:      ptr.String("concurrency"),
-					Target:      ptr.Float64(40.5),
-					Utilization: ptr.Float64(35.5),
-				},
 			},
 			0,
 		},
 		{
-			"incorrect all options",
+			"incorrect all resource options",
 			Options{
 				Resources: &ResourcesOptions{
 					Requests: &ResourcesRequestsOptions{
@@ -300,111 +183,8 @@ func Test_validateOptions(t *testing.T) {
 						Concurrency: ptr.Int64(-1),
 					},
 				},
-				Scale: &ScaleOptions{
-					Min:         ptr.Int64(-1),
-					Max:         ptr.Int64(-1),
-					Metric:      ptr.String("foo"),
-					Target:      ptr.Float64(-1),
-					Utilization: ptr.Float64(110),
-				},
 			},
-			10,
-		},
-		{
-			"valid keda triggers",
-			Options{
-				Scale: &ScaleOptions{
-					KEDA: &KEDAScaleOptions{
-						Triggers: []KEDATrigger{
-							{Type: "http"},
-							{Type: "kafka", LagThreshold: ptr.Int64(10)},
-						},
-					},
-				},
-			},
-			0,
-		},
-		{
-			"empty keda triggers",
-			Options{
-				Scale: &ScaleOptions{
-					KEDA: &KEDAScaleOptions{},
-				},
-			},
-			1,
-		},
-		{
-			"invalid keda trigger type",
-			Options{
-				Scale: &ScaleOptions{
-					KEDA: &KEDAScaleOptions{
-						Triggers: []KEDATrigger{
-							{Type: "invalid"},
-						},
-					},
-				},
-			},
-			1,
-		},
-		{
-			"keda cron trigger missing fields",
-			Options{
-				Scale: &ScaleOptions{
-					KEDA: &KEDAScaleOptions{
-						Triggers: []KEDATrigger{
-							{Type: "cron"},
-						},
-					},
-				},
-			},
-			4,
-		},
-		{
-			"valid keda cron trigger",
-			Options{
-				Scale: &ScaleOptions{
-					KEDA: &KEDAScaleOptions{
-						Triggers: []KEDATrigger{
-							{Type: "cron", Timezone: "UTC", Start: "0 8 * * *", End: "0 20 * * *", DesiredReplicas: ptr.Int64(3)},
-						},
-					},
-				},
-			},
-			0,
-		},
-		{
-			"keda and kpa mutually exclusive",
-			Options{
-				Scale: &ScaleOptions{
-					KEDA: &KEDAScaleOptions{Triggers: []KEDATrigger{{Type: "http"}}},
-					KPA:  &KPAScaleOptions{Metric: ptr.String("concurrency")},
-				},
-			},
-			1,
-		},
-		{
-			"valid kpa options",
-			Options{
-				Scale: &ScaleOptions{
-					KPA: &KPAScaleOptions{
-						Metric:      ptr.String("rps"),
-						Target:      ptr.Float64(50),
-						Utilization: ptr.Float64(80),
-					},
-				},
-			},
-			0,
-		},
-		{
-			"invalid kpa metric",
-			Options{
-				Scale: &ScaleOptions{
-					KPA: &KPAScaleOptions{
-						Metric: ptr.String("bad"),
-					},
-				},
-			},
-			1,
+			5,
 		},
 	}
 
@@ -415,5 +195,201 @@ func Test_validateOptions(t *testing.T) {
 			}
 		})
 	}
+}
 
+func Test_ValidateScale(t *testing.T) {
+	tests := []struct {
+		name     string
+		scale    *ScaleOptions
+		deployer string
+		kafka    *KafkaConfig
+		errs     int
+	}{
+		{
+			"nil scale is valid",
+			nil, "", nil, 0,
+		},
+		{
+			"correct min",
+			&ScaleOptions{Min: ptr.Int64(1)},
+			"", nil, 0,
+		},
+		{
+			"correct max",
+			&ScaleOptions{Max: ptr.Int64(10)},
+			"", nil, 0,
+		},
+		{
+			"correct min & max",
+			&ScaleOptions{Min: ptr.Int64(0), Max: ptr.Int64(10)},
+			"", nil, 0,
+		},
+		{
+			"incorrect min & max",
+			&ScaleOptions{Min: ptr.Int64(100), Max: ptr.Int64(10)},
+			"", nil, 1,
+		},
+		{
+			"negative min",
+			&ScaleOptions{Min: ptr.Int64(-10)},
+			"", nil, 1,
+		},
+		{
+			"negative max",
+			&ScaleOptions{Max: ptr.Int64(-10)},
+			"", nil, 1,
+		},
+		{
+			"keda and kpa mutually exclusive",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{Triggers: []KEDATrigger{{Type: "http"}}},
+				KPA:  &KPAScaleOptions{Metric: ptr.String("concurrency")},
+			},
+			"keda", nil, 1,
+		},
+		{
+			"valid kpa options",
+			&ScaleOptions{
+				KPA: &KPAScaleOptions{
+					Metric:      ptr.String("rps"),
+					Target:      ptr.Float64(50),
+					Utilization: ptr.Float64(80),
+				},
+			},
+			"knative", nil, 0,
+		},
+		{
+			"invalid kpa metric",
+			&ScaleOptions{
+				KPA: &KPAScaleOptions{Metric: ptr.String("bad")},
+			},
+			"knative", nil, 1,
+		},
+		{
+			"kpa target too low",
+			&ScaleOptions{
+				KPA: &KPAScaleOptions{Target: ptr.Float64(0)},
+			},
+			"knative", nil, 1,
+		},
+		{
+			"kpa utilization out of range",
+			&ScaleOptions{
+				KPA: &KPAScaleOptions{Utilization: ptr.Float64(110)},
+			},
+			"knative", nil, 1,
+		},
+		{
+			"kpa requires knative deployer",
+			&ScaleOptions{
+				KPA: &KPAScaleOptions{Metric: ptr.String("concurrency")},
+			},
+			"raw", nil, 1,
+		},
+		{
+			"valid keda triggers",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{
+					Triggers: []KEDATrigger{
+						{Type: "http"},
+						{Type: "kafka", LagThreshold: ptr.Int64(10)},
+					},
+				},
+			},
+			"keda", &KafkaConfig{Brokers: "b", Topic: "t", ConsumerGroup: "g"}, 0,
+		},
+		{
+			"empty keda triggers",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{},
+			},
+			"keda", nil, 2,
+		},
+		{
+			"invalid keda trigger type",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{
+					Triggers: []KEDATrigger{{Type: "invalid"}},
+				},
+			},
+			"keda", nil, 1,
+		},
+		{
+			"keda cron trigger missing fields",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{
+					Triggers: []KEDATrigger{{Type: "cron"}},
+				},
+			},
+			"keda", nil, 4,
+		},
+		{
+			"valid keda cron trigger",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{
+					Triggers: []KEDATrigger{
+						{Type: "cron", Timezone: "UTC", Start: "0 8 * * *", End: "0 20 * * *", DesiredReplicas: ptr.Int64(3)},
+					},
+				},
+			},
+			"keda", nil, 0,
+		},
+		{
+			"keda requires deployer keda",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{Triggers: []KEDATrigger{{Type: "http"}}},
+			},
+			"knative", nil, 1,
+		},
+		{
+			"keda deployer requires triggers",
+			nil, "keda", nil, 1,
+		},
+		{
+			"kafka trigger without kafka config",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{
+					Triggers: []KEDATrigger{{Type: "kafka"}},
+				},
+			},
+			"keda", nil, 1,
+		},
+		{
+			"keda pollingInterval too low",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{
+					PollingInterval: ptr.Int32(0),
+					Triggers:        []KEDATrigger{{Type: "http"}},
+				},
+			},
+			"keda", nil, 1,
+		},
+		{
+			"keda cooldownPeriod too low",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{
+					CooldownPeriod: ptr.Int32(0),
+					Triggers:       []KEDATrigger{{Type: "http"}},
+				},
+			},
+			"keda", nil, 1,
+		},
+		{
+			"http targetValue too low",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{
+					Triggers: []KEDATrigger{{Type: "http", TargetValue: ptr.Int64(0)}},
+				},
+			},
+			"keda", nil, 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ValidateScale(tt.scale, tt.deployer, tt.kafka); len(got) != tt.errs {
+				t.Errorf("ValidateScale() = %v\n got %d errors but want %d", got, len(got), tt.errs)
+			}
+		})
+	}
 }

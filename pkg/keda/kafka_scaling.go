@@ -43,8 +43,8 @@ func triggerAuthName(funcName string) string {
 // direct API consumers. It never infers a kafka trigger: that decision is
 // never made silently, on any path.
 func triggers(f fn.Function) []fn.KEDATrigger {
-	if f.Deploy.Options.Scale != nil && f.Deploy.Options.Scale.KEDA != nil {
-		return f.Deploy.Options.Scale.KEDA.Triggers
+	if f.Scale != nil && f.Scale.KEDA != nil {
+		return f.Scale.KEDA.Triggers
 	}
 	return []fn.KEDATrigger{{Type: "http"}}
 }
@@ -284,22 +284,38 @@ func buildScaledObject(f fn.Function, trigger fn.KEDATrigger, deployment *v1.Dep
 					},
 				},
 			},
-			"spec": map[string]interface{}{
-				"scaleTargetRef": map[string]interface{}{
-					"kind": "Deployment",
-					"name": deployment.Name,
-				},
-				"minReplicaCount": int64(minScale),
-				"maxReplicaCount": int64(maxScale),
-				"cooldownPeriod":  int64(300),
-				"triggers": []interface{}{
-					triggerSpec,
-				},
-			},
+			"spec": buildScaledObjectSpec(f, deployment.Name, minScale, maxScale, triggerSpec),
 		},
 	}
 
 	return so
+}
+
+func buildScaledObjectSpec(f fn.Function, deploymentName string, minScale, maxScale int32, triggerSpec map[string]interface{}) map[string]interface{} {
+	cooldown := int64(300)
+	polling := int64(30)
+	if f.Scale != nil && f.Scale.KEDA != nil {
+		if f.Scale.KEDA.CooldownPeriod != nil {
+			cooldown = int64(*f.Scale.KEDA.CooldownPeriod)
+		}
+		if f.Scale.KEDA.PollingInterval != nil {
+			polling = int64(*f.Scale.KEDA.PollingInterval)
+		}
+	}
+
+	return map[string]interface{}{
+		"scaleTargetRef": map[string]interface{}{
+			"kind": "Deployment",
+			"name": deploymentName,
+		},
+		"minReplicaCount": int64(minScale),
+		"maxReplicaCount": int64(maxScale),
+		"cooldownPeriod":  cooldown,
+		"pollingInterval": polling,
+		"triggers": []interface{}{
+			triggerSpec,
+		},
+	}
 }
 
 // ensureScaledObject creates or updates a KEDA ScaledObject for Kafka scaling.

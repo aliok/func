@@ -78,15 +78,13 @@ func TestInt_KafkaScaling(t *testing.T) {
 			Image:     "quay.io/mvasek/func-test-service@sha256:2eca4de00d7569c8791634bdbb0c4d5ec8fb061b001549314591e839dabd5269",
 			Namespace: ns,
 			Expose:    "none",
-			Options: fn.Options{
-				Scale: &fn.ScaleOptions{
-					Min: &minScale,
-					Max: &maxScale,
-					KEDA: &fn.KEDAScaleOptions{
-						Triggers: []fn.KEDATrigger{
-							{Type: "kafka", LagThreshold: &lagThreshold},
-						},
-					},
+		},
+		Scale: &fn.ScaleOptions{
+			Min: &minScale,
+			Max: &maxScale,
+			KEDA: &fn.KEDAScaleOptions{
+				Triggers: []fn.KEDATrigger{
+					{Type: "kafka", LagThreshold: &lagThreshold},
 				},
 			},
 		},

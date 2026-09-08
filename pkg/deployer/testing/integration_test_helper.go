@@ -417,11 +417,9 @@ func TestInt_Scale(t *testing.T, deployer fn.Deployer, remover fn.Remover, descr
 	// Note: There is no reason for all these being pointers:
 	minScale := int64(2)
 	maxScale := int64(100)
-	f.Deploy.Options = fn.Options{
-		Scale: &fn.ScaleOptions{
-			Min: &minScale,
-			Max: &maxScale,
-		},
+	f.Scale = &fn.ScaleOptions{
+		Min: &minScale,
+		Max: &maxScale,
 	}
 
 	// Scaffold

@@ -118,7 +118,7 @@
 						"keda"
 					],
 					"type": "string",
-					"description": "Deployer records the deployer the Function is CURRENTLY DEPLOYED:\nobserved state, written after successful deployment, and cleared on\nundeploy alongside Namespace."
+					"description": "ActiveDeployer records the deployer the Function is CURRENTLY DEPLOYED\nwith: observed state, written after successful deployment, and cleared\non undeploy alongside Namespace. User intent lives on Function.Deployer."
 				},
 				"subscriptions": {
 					"items": {
@@ -138,7 +138,7 @@
 						""
 					],
 					"type": "string",
-					"description": "Expose records the external exposure mode CURRENTLY applied on the\ncluster for raw/keda (observed state). Written after successful deploy,\ncleared on undeploy alongside Namespace and Deployer. Empty means\ncluster-local (or never exposed). User intent lives on Function.Expose."
+					"description": "ActiveExpose records the external exposure mode CURRENTLY applied on\nthe cluster for raw/keda (observed state). Written after successful\ndeploy, cleared on undeploy alongside Namespace and ActiveDeployer.\nEmpty means cluster-local (or never exposed). User intent lives on\nFunction.Expose."
 				}
 			},
 			"additionalProperties": false,
@@ -218,7 +218,7 @@
 						"keda"
 					],
 					"type": "string",
-					"description": "Deployer with which to deploy the Function: the requested (intended)\ndeployer. This is the user's choice and persists across undeploy.\nThe deployer a Function is CURRENTLY deployed with is recorded separately\nin .Deploy.Deployer, which is cleared on undeploy."
+					"description": "Deployer with which to deploy the Function: the requested (intended)\ndeployer. This is the user's choice and persists across undeploy.\nThe deployer a Function is CURRENTLY deployed with is recorded separately\nin .Deploy.ActiveDeployer, which is cleared on undeploy."
 				},
 				"expose": {
 					"enum": [
@@ -227,7 +227,7 @@
 						""
 					],
 					"type": "string",
-					"description": "Expose is the requested (intended) external exposure mode for the raw\nand keda deployers (knative manages its own networking and ignores it).\nValues: \"route\" (OpenShift Route; OpenShift only), \"none\" (cluster-local).\nEmpty means cluster-local. Persists across undeploy like Deployer.\nThe mode CURRENTLY applied on the cluster is recorded separately in\n.Deploy.Expose, which is cleared on undeploy."
+					"description": "Expose is the requested (intended) external exposure mode for the raw\nand keda deployers (knative manages its own networking and ignores it).\nValues: \"route\" (OpenShift Route; OpenShift only), \"none\" (cluster-local).\nEmpty means cluster-local. Persists across undeploy like Deployer.\nThe mode CURRENTLY applied on the cluster is recorded separately in\n.Deploy.ActiveExpose, which is cleared on undeploy."
 				},
 				"created": {
 					"type": "string",
@@ -256,6 +256,11 @@
 					"$schema": "http://json-schema.org/draft-04/schema#",
 					"$ref": "#/definitions/DeploySpec",
 					"description": "Deploy defines the deployment properties for a function"
+				},
+				"scale": {
+					"$schema": "http://json-schema.org/draft-04/schema#",
+					"$ref": "#/definitions/ScaleOptions",
+					"description": "Scale defines autoscaling configuration for the function."
 				}
 			},
 			"additionalProperties": false,
@@ -292,6 +297,14 @@
 		},
 		"KEDAScaleOptions": {
 			"properties": {
+				"pollingInterval": {
+					"type": "integer",
+					"minimum": 1
+				},
+				"cooldownPeriod": {
+					"type": "integer",
+					"minimum": 1
+				},
 				"triggers": {
 					"items": {
 						"$schema": "http://json-schema.org/draft-04/schema#",
@@ -315,6 +328,10 @@
 						"cron"
 					],
 					"type": "string"
+				},
+				"targetValue": {
+					"type": "integer",
+					"minimum": 1
 				},
 				"lagThreshold": {
 					"type": "integer",
@@ -511,10 +528,6 @@
 		},
 		"Options": {
 			"properties": {
-				"scale": {
-					"$schema": "http://json-schema.org/draft-04/schema#",
-					"$ref": "#/definitions/ScaleOptions"
-				},
 				"resources": {
 					"$schema": "http://json-schema.org/draft-04/schema#",
 					"$ref": "#/definitions/ResourcesOptions"
@@ -623,22 +636,6 @@
 				"max": {
 					"type": "integer",
 					"minimum": 0
-				},
-				"metric": {
-					"enum": [
-						"concurrency",
-						"rps"
-					],
-					"type": "string"
-				},
-				"target": {
-					"type": "number",
-					"minimum": 0
-				},
-				"utilization": {
-					"maximum": 100,
-					"minimum": 1,
-					"type": "number"
 				},
 				"keda": {
 					"$schema": "http://json-schema.org/draft-04/schema#",
