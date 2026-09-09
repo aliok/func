@@ -10,6 +10,7 @@ import (
 
 	"github.com/coreos/go-semver/semver"
 	"gopkg.in/yaml.v2"
+	"knative.dev/pkg/ptr"
 )
 
 // TestMigrated ensures that the .Migrated() method returns whether or not the
@@ -502,6 +503,219 @@ deployer: raw
 		}
 		if migrated.Scale != nil {
 			t.Errorf("expected no scale for raw deployer, got %+v", migrated.Scale)
+		}
+	})
+
+	t.Run("empty Root falls back to the in-memory scale instead of dropping it", func(t *testing.T) {
+		// Library callers can construct a Function with no backing file
+		// (Root == ""). The migration must not silently clear
+		// Deploy.Options.Scale without moving it to the top-level field.
+		min := int64(2)
+		max := int64(20)
+		f := Function{
+			SpecVersion: "0.36.0",
+			Deploy: DeploySpec{
+				Options: Options{
+					Scale: &ScaleOptions{Min: &min, Max: &max},
+				},
+			},
+		}
+		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.37.0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if migrated.Scale == nil {
+			t.Fatal("expected the in-memory scale to be moved to the top level, got nil")
+		}
+		if migrated.Scale.Min == nil || *migrated.Scale.Min != 2 {
+			t.Errorf("scale.min = %v, want 2", migrated.Scale.Min)
+		}
+		if migrated.Scale.Max == nil || *migrated.Scale.Max != 20 {
+			t.Errorf("scale.max = %v, want 20", migrated.Scale.Max)
+		}
+		if migrated.Deploy.Options.Scale != nil {
+			t.Error("expected deploy.options.scale to be cleared")
+		}
+	})
+
+	t.Run("keda deployer with legacy flat fields does not produce scale.kpa", func(t *testing.T) {
+		// scale.kpa is only valid for deployer: knative. Building it from
+		// legacy flat fields regardless of deployer, combined with the
+		// keda-defaults-to-http-trigger block always setting scale.keda for
+		// deployer: keda, previously produced a migrated function with both
+		// scale.kpa and scale.keda set -- which ValidateScale rejects as
+		// mutually exclusive.
+		root := t.TempDir()
+		funcYaml := `specVersion: "0.36.0"
+name: testfn
+runtime: go
+deployer: keda
+deploy:
+  options:
+    scale:
+      metric: concurrency
+      target: 100.0
+      utilization: 70.0
+`
+		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		f := Function{SpecVersion: "0.36.0", Deployer: "keda", Root: root}
+		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.37.0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if migrated.Scale == nil {
+			t.Fatal("expected scale to be populated")
+		}
+		if migrated.Scale.KPA != nil {
+			t.Errorf("expected scale.kpa to stay nil for deployer: keda, got %+v", migrated.Scale.KPA)
+		}
+		if migrated.Scale.KEDA == nil || len(migrated.Scale.KEDA.Triggers) == 0 {
+			t.Fatal("expected scale.keda to be populated with a default http trigger")
+		}
+		if errs := ValidateScale(migrated.Scale, "keda", nil); len(errs) != 0 {
+			t.Errorf("expected the migrated scale to pass validation, got: %v", errs)
+		}
+	})
+
+	t.Run("old deploy.deployer/deploy.expose keys move to the renamed fields", func(t *testing.T) {
+		// This is also exactly the pre-#3953 legacy shape: no top-level
+		// deployer key at all (the field didn't exist yet), deployer
+		// intent recorded only under the old deploy.deployer key. The
+		// migration must recover that as f.Deployer (intent), not just
+		// Deploy.ActiveDeployer (observed state) -- otherwise the user's
+		// next deploy silently defaults to knative instead of keda, and
+		// a keda deployer with no trigger fails validation outright.
+		root := t.TempDir()
+		funcYaml := `specVersion: "0.36.0"
+name: testfn
+runtime: go
+deploy:
+  deployer: keda
+  expose: route
+`
+		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		f := Function{SpecVersion: "0.36.0", Root: root}
+		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.37.0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if migrated.Deploy.ActiveDeployer != "keda" {
+			t.Errorf("Deploy.ActiveDeployer = %q, want keda", migrated.Deploy.ActiveDeployer)
+		}
+		if migrated.Deploy.ActiveExpose != "route" {
+			t.Errorf("Deploy.ActiveExpose = %q, want route", migrated.Deploy.ActiveExpose)
+		}
+		if migrated.Deployer != "keda" {
+			t.Errorf("Deployer = %q, want keda (recovered from the legacy deploy.deployer field)", migrated.Deployer)
+		}
+		if migrated.Scale == nil || migrated.Scale.KEDA == nil || len(migrated.Scale.KEDA.Triggers) != 1 || migrated.Scale.KEDA.Triggers[0].Type != "http" {
+			t.Errorf("expected a default http trigger once Deployer is recovered as keda, got %+v", migrated.Scale)
+		}
+	})
+
+	t.Run("legacy deploy.deployer intent is not applied when top-level Deployer is already set", func(t *testing.T) {
+		// A post-#3953 file always has an explicit top-level deployer
+		// (cmd/deploy.go sets it on every deploy): the legacy field must
+		// not override an already-present, potentially different, intent.
+		root := t.TempDir()
+		funcYaml := `specVersion: "0.36.0"
+name: testfn
+runtime: go
+deployer: raw
+deploy:
+  deployer: knative
+`
+		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		f := Function{SpecVersion: "0.36.0", Deployer: "raw", Root: root}
+		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.37.0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if migrated.Deployer != "raw" {
+			t.Errorf("Deployer = %q, want raw (must not be overwritten by the legacy observed field)", migrated.Deployer)
+		}
+		if migrated.Deploy.ActiveDeployer != "knative" {
+			t.Errorf("Deploy.ActiveDeployer = %q, want knative", migrated.Deploy.ActiveDeployer)
+		}
+	})
+
+	t.Run("keda-defaults-to-http preserves existing KEDA tuning fields", func(t *testing.T) {
+		f := Function{
+			SpecVersion: "0.36.0",
+			Deployer:    "keda",
+			Scale: &ScaleOptions{
+				KEDA: &KEDAScaleOptions{
+					PollingInterval: ptr.Int32(45),
+					CooldownPeriod:  ptr.Int32(600),
+				},
+			},
+		}
+		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.37.0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if migrated.Scale == nil || migrated.Scale.KEDA == nil {
+			t.Fatal("expected scale.keda to be populated")
+		}
+		if migrated.Scale.KEDA.PollingInterval == nil || *migrated.Scale.KEDA.PollingInterval != 45 {
+			t.Errorf("pollingInterval = %v, want 45 (must survive the default-http-trigger migration)", migrated.Scale.KEDA.PollingInterval)
+		}
+		if migrated.Scale.KEDA.CooldownPeriod == nil || *migrated.Scale.KEDA.CooldownPeriod != 600 {
+			t.Errorf("cooldownPeriod = %v, want 600 (must survive the default-http-trigger migration)", migrated.Scale.KEDA.CooldownPeriod)
+		}
+		if len(migrated.Scale.KEDA.Triggers) != 1 || migrated.Scale.KEDA.Triggers[0].Type != "http" {
+			t.Errorf("expected a default http trigger, got %+v", migrated.Scale.KEDA.Triggers)
+		}
+	})
+
+	t.Run("no-op when neither old deployer/expose key is present", func(t *testing.T) {
+		root := t.TempDir()
+		funcYaml := `specVersion: "0.36.0"
+name: testfn
+runtime: go
+`
+		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		f := Function{SpecVersion: "0.36.0", Root: root}
+		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.37.0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if migrated.Deploy.ActiveDeployer != "" || migrated.Deploy.ActiveExpose != "" {
+			t.Errorf("expected both fields to stay empty, got ActiveDeployer=%q ActiveExpose=%q",
+				migrated.Deploy.ActiveDeployer, migrated.Deploy.ActiveExpose)
+		}
+	})
+
+	t.Run("empty Root does not touch the in-memory deployer/expose value", func(t *testing.T) {
+		// Library callers can construct a Function with no backing file.
+		// The in-memory Deploy.ActiveDeployer/ActiveExpose already reflect
+		// whatever the caller set via the current Go field names -- this
+		// migration must leave them alone, not clear them.
+		f := Function{
+			SpecVersion: "0.36.0",
+			Deploy:      DeploySpec{ActiveDeployer: "raw", ActiveExpose: "none"},
+		}
+		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.37.0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if migrated.Deploy.ActiveDeployer != "raw" {
+			t.Errorf("Deploy.ActiveDeployer = %q, want raw", migrated.Deploy.ActiveDeployer)
+		}
+		if migrated.Deploy.ActiveExpose != "none" {
+			t.Errorf("Deploy.ActiveExpose = %q, want none", migrated.Deploy.ActiveExpose)
 		}
 	})
 }

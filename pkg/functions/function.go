@@ -262,9 +262,19 @@ func validateKafka(kafka *KafkaConfig, invoke, runtime string) (errors []string)
 		if kafka.SecurityProtocol != "SASL_PLAINTEXT" && kafka.SecurityProtocol != "SASL_SSL" {
 			errors = append(errors, "run.kafka.sasl requires securityProtocol SASL_PLAINTEXT or SASL_SSL")
 		}
-		validMechanisms := map[string]bool{"": true, "PLAIN": true, "SCRAM-SHA-256": true, "SCRAM-SHA-512": true}
-		if !validMechanisms[kafka.SASL.Mechanism] {
-			errors = append(errors, "run.kafka.sasl.mechanism must be one of: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512")
+		if kafka.SASL.Mechanism == "" {
+			// An empty mechanism used to be accepted here, but KEDA's
+			// scaler only sets its "sasl" trigger metadata when the
+			// mechanism is non-empty (see buildScaledObject) -- an empty
+			// mechanism silently left KEDA with no SASL configuration at
+			// all, authenticating differently (or not at all) from
+			// whatever the function's own container does.
+			errors = append(errors, "run.kafka.sasl.mechanism is required")
+		} else {
+			validMechanisms := map[string]bool{"PLAIN": true, "SCRAM-SHA-256": true, "SCRAM-SHA-512": true}
+			if !validMechanisms[kafka.SASL.Mechanism] {
+				errors = append(errors, "run.kafka.sasl.mechanism must be one of: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512")
+			}
 		}
 		if kafka.SASL.User == "" {
 			errors = append(errors, "run.kafka.sasl.user is required")
@@ -342,7 +352,7 @@ type DeploySpec struct {
 	// ActiveDeployer records the deployer the Function is CURRENTLY DEPLOYED
 	// with: observed state, written after successful deployment, and cleared
 	// on undeploy alongside Namespace. User intent lives on Function.Deployer.
-	ActiveDeployer string `yaml:"deployer,omitempty" jsonschema:"enum=knative,enum=raw,enum=keda"`
+	ActiveDeployer string `yaml:"activeDeployer,omitempty" jsonschema:"enum=knative,enum=raw,enum=keda"`
 
 	Subscriptions []KnativeSubscription `yaml:"subscriptions,omitempty"`
 
@@ -356,7 +366,7 @@ type DeploySpec struct {
 	// deploy, cleared on undeploy alongside Namespace and ActiveDeployer.
 	// Empty means cluster-local (or never exposed). User intent lives on
 	// Function.Expose.
-	ActiveExpose string `yaml:"expose,omitempty" jsonschema:"enum=route,enum=none,enum="`
+	ActiveExpose string `yaml:"activeExpose,omitempty" jsonschema:"enum=route,enum=none,enum="`
 }
 
 // HealthEndpoints specify the liveness and readiness endpoints for a Runtime

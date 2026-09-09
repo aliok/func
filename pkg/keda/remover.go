@@ -71,10 +71,17 @@ func (remover *Remover) Remove(ctx context.Context, name, ns string) error {
 
 	// Clean up Kafka scaling resources before deleting the Deployment.
 	// These have ownerReferences so they'd be garbage-collected, but
-	// explicit deletion avoids races with a slow GC.
-	// Ignore not-found: these resources may not exist (HTTP-only deploy).
-	_ = deleteScaledObject(ctx, dynClient, ns, scaledObjectName(name))
-	_ = deleteTriggerAuth(ctx, dynClient, ns, triggerAuthName(name))
+	// explicit deletion avoids races with a slow GC. Errors here (both
+	// functions already ignore not-found) are not fatal to Remove: the
+	// owner reference still cleans these up eventually, but the user is
+	// warned so a persistent failure (e.g. missing RBAC) doesn't go
+	// unnoticed.
+	if err := deleteScaledObject(ctx, dynClient, ns, scaledObjectName(name)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
+	if err := deleteTriggerAuth(ctx, dynClient, ns, triggerAuthName(name)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
 
 	deploymentClient := clientset.AppsV1().Deployments(ns)
 

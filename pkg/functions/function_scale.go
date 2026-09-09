@@ -22,6 +22,13 @@ func ValidateScale(scale *ScaleOptions, deployer string, kafka *KafkaConfig) (er
 	if scale.Min != nil && scale.Max != nil && *scale.Max < *scale.Min {
 		errors = append(errors, "scale.max must be >= scale.min")
 	}
+	if deployer == "keda" && scale.Max != nil && *scale.Max == 0 {
+		// 0 means "no limit" for the knative/kpa deployer, but keda's
+		// HTTPScaledObject/ScaledObject map it straight to the HPA's
+		// maxReplicas, which must be >= 1. Leave scale.max unset to get
+		// keda's own default instead.
+		errors = append(errors, "scale.max must be >= 1 when deployer is keda: 0 (\"no limit\") is not a valid value, leave scale.max unset to use keda's default")
+	}
 
 	if scale.KEDA != nil && scale.KPA != nil {
 		errors = append(errors, "scale.keda and scale.kpa are mutually exclusive")
@@ -57,13 +64,28 @@ func validateKEDAScale(keda *KEDAScaleOptions, kafka *KafkaConfig) (errors []str
 		errors = append(errors, "scale.keda.cooldownPeriod must be >= 1")
 	}
 
+	var sawHTTP, sawKafka bool
+	seenTypes := map[string]bool{}
 	for i, t := range keda.Triggers {
+		// The deployer only ever materializes one HTTPScaledObject and one
+		// Kafka ScaledObject regardless of how many triggers of that type
+		// are configured -- kafkaTrigger() and the HTTP targetValue lookup
+		// both take just the first match. A second trigger of the same type
+		// would silently have its settings ignored, so reject it here
+		// instead.
+		if seenTypes[t.Type] && (t.Type == "http" || t.Type == "kafka") {
+			errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].type %q is repeated: only one trigger of each type is supported", i, t.Type))
+		}
+		seenTypes[t.Type] = true
+
 		switch t.Type {
 		case "http":
+			sawHTTP = true
 			if t.TargetValue != nil && *t.TargetValue < 1 {
 				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].targetValue must be >= 1", i))
 			}
 		case "kafka":
+			sawKafka = true
 			if kafka == nil {
 				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d] has type kafka but run.kafka is not configured", i))
 			}
@@ -74,23 +96,23 @@ func validateKEDAScale(keda *KEDAScaleOptions, kafka *KafkaConfig) (errors []str
 				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].activationLagThreshold must not be negative", i))
 			}
 		case "cron":
-			if t.Timezone == "" {
-				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].timezone is required for cron triggers", i))
-			}
-			if t.Start == "" {
-				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].start is required for cron triggers", i))
-			}
-			if t.End == "" {
-				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].end is required for cron triggers", i))
-			}
-			if t.DesiredReplicas == nil {
-				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].desiredReplicas is required for cron triggers", i))
-			} else if *t.DesiredReplicas < 1 {
-				errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].desiredReplicas must be >= 1", i))
-			}
+			// "cron" is a valid value in func.yaml's schema, reserved for a
+			// future deployer implementation, but the keda deployer does not
+			// implement it yet: accepting it here would deploy successfully
+			// and silently create no scaler at all.
+			errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].type cron is not yet supported", i))
 		default:
-			errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].type has invalid value %q, allowed: http, kafka, cron", i, t.Type))
+			errors = append(errors, fmt.Sprintf("scale.keda.triggers[%d].type has invalid value %q, allowed: http, kafka", i, t.Type))
 		}
+	}
+
+	// The keda deployer creates a separate HTTPScaledObject for "http" and a
+	// separate ScaledObject for "kafka", both targeting the same Deployment.
+	// KEDA only allows one scaler per workload, so combining them is
+	// rejected up front instead of failing later, mid-deploy, against the
+	// Kubernetes API.
+	if sawHTTP && sawKafka {
+		errors = append(errors, "scale.keda.triggers must not combine type http with type kafka: they cannot scale the same Deployment together, not yet supported")
 	}
 	return
 }

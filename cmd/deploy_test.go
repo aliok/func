@@ -1212,7 +1212,7 @@ func TestDeploy_NamespaceUpdateWarning(t *testing.T) {
 		Runtime: "go",
 		Root:    root,
 		Deploy: fn.DeploySpec{
-			Namespace: "myns",
+			Namespace:      "myns",
 			ActiveDeployer: deployers.Default,
 		},
 	}

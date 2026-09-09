@@ -144,16 +144,16 @@ More info: https://k8s.io/docs/tasks/configure-pod-container/configure-service-a
 
 ### `scale`
 
-Top-level autoscaling configuration. Settings are deployer-aware: `kpa` is used with `deployer: knative`, `keda` with `deployer: keda`. `min`/`max` are shared across all deployers.
+Top-level autoscaling configuration. Settings are deployer-aware: `kpa` is used with `deployer: knative`, `keda` with `deployer: keda`. `min`/`max` are shared across all deployers, but the default when left unset differs per deployer: `deployer: raw` deploys a fixed-size Deployment with no autoscaler (`min` unset or 0 effectively means 1 replica; `max` isn't enforced), `deployer: knative` defaults to `min=0`/`max=0` (scale-to-zero, no limit, per Knative Serving's own defaults), and `deployer: keda` defaults to `min=1`/`max=10`.
 
-- `min`: Minimum number of replicas. Non-negative integer, default is 0. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/scale-bounds/#lower-bound).
-- `max`: Maximum number of replicas. Non-negative integer, default is 0 (no limit). See related [Knative docs](https://knative.dev/docs/serving/autoscaling/scale-bounds/#upper-bound).
+- `min`: Minimum number of replicas. Non-negative integer. Default is 0 for `deployer: knative`, but 1 for `deployer: raw` and `deployer: keda`. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/scale-bounds/#lower-bound).
+- `max`: Maximum number of replicas. Non-negative integer. Default is 0 (no limit) for `deployer: knative`, not enforced for `deployer: raw`, and 10 for `deployer: keda`. For `deployer: keda` specifically, `max: 0` is rejected (unlike `knative`, where it means no limit): KEDA maps it to an HPA `maxReplicas`, which must be `>= 1`. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/scale-bounds/#upper-bound).
 - `kpa`: Knative Pod Autoscaler config, used only with `deployer: knative`.
   - `metric`: metric type watched by the autoscaler: `concurrency` (default) or `rps`. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/autoscaling-metrics/).
   - `target`: target value for the metric. Defaults to `options.resources.limits.concurrency` when given. Float >= 0.01, default is 100. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/concurrency/#soft-limit).
   - `utilization`: target utilization percentage before scaling up. Float 1-100, default is 70. See related [Knative docs](https://knative.dev/docs/serving/autoscaling/concurrency/#target-utilization).
 - `keda`: KEDA-specific scaling config, required when `deployer: keda`.
-  - `pollingInterval`: how often KEDA checks triggers, in seconds. Default is 30.
+  - `pollingInterval`: how often KEDA checks triggers, in seconds. Default is 30. Only applies to `kafka` triggers (a `ScaledObject`, which polls); the `http` trigger's `HTTPScaledObject` has no polling concept — it scales from interceptor-reported metrics instead — so this setting has no effect when only an `http` trigger is configured.
   - `cooldownPeriod`: seconds to wait after the last trigger fires before scaling to min. Default is 300.
   - `triggers`: a list of KEDA triggers. At least one is required. Each trigger has a `type` of `http`, `kafka`, or `cron`:
     - `http`: scales based on incoming HTTP request rate.
@@ -200,7 +200,7 @@ deploy:
         concurrency: 100
 ```
 
-Example using `deployer: keda` with an HTTP trigger and a Kafka trigger:
+Example using `deployer: keda` with an HTTP trigger:
 
 ```yaml
 deployer: keda
@@ -213,10 +213,31 @@ scale:
     triggers:
       - type: http
         targetValue: 200
+```
+
+Example using `deployer: keda` with a Kafka consumer-lag trigger:
+
+```yaml
+deployer: keda
+scale:
+  min: 0
+  max: 10
+  keda:
+    pollingInterval: 30
+    cooldownPeriod: 300
+    triggers:
       - type: kafka
         lagThreshold: 5
         activationLagThreshold: 0
 ```
+
+Note: `http` and `kafka` triggers cannot currently be combined in the same
+`scale.keda.triggers` list. The keda deployer creates a separate
+`HTTPScaledObject` for `http` and a separate `ScaledObject` for `kafka`,
+both targeting the same Deployment, and KEDA only allows one scaler per
+workload. `func` rejects this combination at validation time. The `cron`
+trigger type is accepted by the schema but not yet implemented by any
+deployer; using it also fails validation.
 
 Example using `deployer: knative` with explicit KPA settings:
 
@@ -233,21 +254,20 @@ scale:
 ### `run.kafka`
 
 When set, the function is deployed as a Kafka consumer: it reads CloudEvents from a Kafka
-topic instead of (or, with the KEDA `http` trigger, in addition to) serving HTTP requests.
-Requires `invoke: cloudevent` and the Go runtime.
+topic instead of serving HTTP requests. Requires `invoke: cloudevent` and the Go runtime.
 
 - `brokers`: comma-separated list of Kafka broker addresses.
 - `topic`: the topic to consume.
 - `consumerGroup`: the Kafka consumer group ID.
 - `securityProtocol`: one of `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, `SASL_SSL`.
-- `tls`: TLS configuration, required for `SSL` and `SASL_SSL`.
+- `tls`: TLS configuration, only valid for `SSL` and `SASL_SSL`. Optional for both: if unset, the broker certificate is verified against the system's CA trust store. Set it to use a custom CA certificate or mutual TLS.
   - `caCert`: path to the CA certificate PEM file used to verify the broker certificate. Typically mounted via [`volumes`](#volumes).
   - `clientCert`, `clientKey`: paths to the client certificate/key PEM files, for mutual TLS.
   - `skipVerify`: skip broker certificate verification (development only).
 - `sasl`: SASL configuration, required for `SASL_PLAINTEXT` and `SASL_SSL`.
   - `mechanism`: one of `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`.
   - `user`: SASL username. Supports `{{ secret:name:key }}` and `{{ configMap:name:key }}` syntax, or a plain value.
-  - `password`: SASL password. Supports `{{ secret:name:key }}` and `{{ configMap:name:key }}` syntax.
+  - `password`: SASL password. Supports `{{ secret:name:key }}` and `{{ configMap:name:key }}` syntax, or a plain value (at least for debugging purposes).
 
 ```yaml
 run:

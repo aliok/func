@@ -358,11 +358,19 @@ func migratePersistentVolumeTypoFixup(fn Function, m migration) (Function, error
 }
 
 // migrateScaleToTopLevel moves scale config from deploy.options.scale to the
-// top-level scale field. It also moves the flat metric/target/utilization
-// fields (from pre-0.37.0 func.yaml files) into the kpa sub-key.
+// top-level scale field, moves the flat metric/target/utilization fields
+// (from pre-0.37.0 func.yaml files) into the kpa sub-key, and renames
+// DeploySpec's observed-state deploy.deployer/deploy.expose YAML keys to
+// deploy.activeDeployer/deploy.activeExpose (they collided in name with the
+// top-level deployer/expose fields -- user intent -- despite meaning the
+// opposite thing: observed, currently-deployed state).
 func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
-	// Read the on-disk func.yaml to capture the old flat KPA fields that no
-	// longer exist on ScaleOptions (Metric, Target, Utilization).
+	// Read the on-disk func.yaml to capture pre-migration fields that no
+	// longer deserialize under their current shape: the flat KPA fields
+	// (Metric, Target, Utilization), which no longer exist on ScaleOptions,
+	// and deploy.deployer/deploy.expose, since DeploySpec.ActiveDeployer/
+	// ActiveExpose (the Go fields the primary unmarshal reads into) now use
+	// different YAML tags (activeDeployer/activeExpose).
 	type oldScale struct {
 		Min         *int64            `yaml:"min,omitempty"`
 		Max         *int64            `yaml:"max,omitempty"`
@@ -376,10 +384,12 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 		Scale *oldScale `yaml:"scale,omitempty"`
 	}
 	type oldDeploy struct {
-		Options oldOptions `yaml:"options,omitempty"`
+		Options  oldOptions `yaml:"options,omitempty"`
+		Deployer string     `yaml:"deployer,omitempty"`
+		Expose   string     `yaml:"expose,omitempty"`
 	}
 	var disk struct {
-		Deploy oldDeploy    `yaml:"deploy,omitempty"`
+		Deploy oldDeploy     `yaml:"deploy,omitempty"`
 		Scale  *ScaleOptions `yaml:"scale,omitempty"`
 	}
 
@@ -390,7 +400,33 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 		}
 	}
 
+	// A pre-0.37.0 (in fact pre-#3953) func.yaml had no top-level deployer
+	// field at all: DeploySpec.Deployer (now ActiveDeployer) was the only
+	// place a function's deployer was recorded, and it meant user intent,
+	// not observed state -- that split only exists since the top-level
+	// field was introduced (commit 65029640). Every deploy since then sets
+	// f.Deployer explicitly (see cmd/deploy.go), so the only way to see it
+	// empty here while the legacy observed field is non-empty is a
+	// function deployed before that split existed. Treat the old value as
+	// the carried-forward intent too, not just observed state -- computed
+	// before anything below reads f.Deployer, so both the scale.kpa
+	// decision and the keda-defaults-to-http-trigger block see it.
+	if f.Deployer == "" && disk.Deploy.Deployer != "" {
+		f.Deployer = disk.Deploy.Deployer
+	}
+
 	old := disk.Deploy.Options.Scale
+	if old == nil && f.Deploy.Options.Scale != nil {
+		// f.Root is empty (library callers construct a Function without a
+		// backing file) or the on-disk read found nothing: fall back to the
+		// already-deserialized in-memory value instead of treating it as
+		// absent. It can't carry the old flat metric/target/utilization
+		// fields -- those no longer exist on the current ScaleOptions type,
+		// so there's nothing on this path to recover them from -- but its
+		// Min/Max/KEDA/KPA must not be silently dropped.
+		mem := f.Deploy.Options.Scale
+		old = &oldScale{Min: mem.Min, Max: mem.Max, KEDA: mem.KEDA, KPA: mem.KPA}
+	}
 
 	if old != nil {
 		newScale := &ScaleOptions{
@@ -400,8 +436,18 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 			KPA:  old.KPA,
 		}
 
+		// scale.kpa is only valid for deployer: knative (or the unset/
+		// default deployer, which behaves as knative) -- see ValidateScale.
+		// Building it here regardless of deployer let a pre-0.37
+		// deployer: keda function with legacy flat fields end up with both
+		// scale.kpa (from this block) and scale.keda (from the block below,
+		// which always populates it for deployer: keda), which ValidateScale
+		// then rejects as a mutually-exclusive combination -- so the
+		// migration itself produced a function that immediately failed
+		// validation.
 		hasFlat := old.Metric != nil || old.Target != nil || old.Utilization != nil
-		if hasFlat && newScale.KPA == nil {
+		validKPADeployer := f.Deployer == "" || f.Deployer == "knative"
+		if hasFlat && newScale.KPA == nil && validKPADeployer {
 			newScale.KPA = &KPAScaleOptions{
 				Metric:      old.Metric,
 				Target:      old.Target,
@@ -426,11 +472,27 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 		if f.Scale == nil {
 			f.Scale = &ScaleOptions{}
 		}
-		if f.Scale.KEDA == nil || len(f.Scale.KEDA.Triggers) == 0 {
-			f.Scale.KEDA = &KEDAScaleOptions{
-				Triggers: []KEDATrigger{{Type: "http"}},
-			}
+		if f.Scale.KEDA == nil {
+			f.Scale.KEDA = &KEDAScaleOptions{}
 		}
+		// Only set Triggers: replacing the whole KEDAScaleOptions struct
+		// here would silently discard any PollingInterval/CooldownPeriod
+		// the user already had configured alongside an empty triggers list.
+		if len(f.Scale.KEDA.Triggers) == 0 {
+			f.Scale.KEDA.Triggers = []KEDATrigger{{Type: "http"}}
+		}
+	}
+
+	// deploy.deployer/deploy.expose moved to deploy.activeDeployer/
+	// deploy.activeExpose. f.Root == "" (library callers) needs no handling
+	// here: the in-memory value already reflects whatever was set via the
+	// Go field name, unaffected by the YAML tag change, so there's nothing
+	// on disk to migrate from and nothing to fall back to.
+	if disk.Deploy.Deployer != "" {
+		f.Deploy.ActiveDeployer = disk.Deploy.Deployer
+	}
+	if disk.Deploy.Expose != "" {
+		f.Deploy.ActiveExpose = disk.Deploy.Expose
 	}
 
 	f.SpecVersion = m.version

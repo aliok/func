@@ -72,12 +72,12 @@ func TestInt_KafkaScaling(t *testing.T) {
 		Runtime:     "blub",
 		Template:    "cloudevents",
 		Created:     time.Now(),
+		Expose:      "none",
 		Deploy: fn.DeploySpec{
 			// pinned prebuilt image: this test exercises the deployer's
 			// Kafka-scaling object creation, not the build/image flow
 			Image:     "quay.io/mvasek/func-test-service@sha256:2eca4de00d7569c8791634bdbb0c4d5ec8fb061b001549314591e839dabd5269",
 			Namespace: ns,
-			Expose:    "none",
 		},
 		Scale: &fn.ScaleOptions{
 			Min: &minScale,

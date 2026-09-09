@@ -287,7 +287,29 @@ func Test_ValidateScale(t *testing.T) {
 			"raw", nil, 1,
 		},
 		{
-			"valid keda triggers",
+			"valid keda http trigger",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{
+					Triggers: []KEDATrigger{
+						{Type: "http"},
+					},
+				},
+			},
+			"keda", nil, 0,
+		},
+		{
+			"valid keda kafka trigger",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{
+					Triggers: []KEDATrigger{
+						{Type: "kafka", LagThreshold: ptr.Int64(10)},
+					},
+				},
+			},
+			"keda", &KafkaConfig{Brokers: "b", Topic: "t", ConsumerGroup: "g"}, 0,
+		},
+		{
+			"keda http and kafka triggers combined is not yet supported",
 			&ScaleOptions{
 				KEDA: &KEDAScaleOptions{
 					Triggers: []KEDATrigger{
@@ -296,7 +318,7 @@ func Test_ValidateScale(t *testing.T) {
 					},
 				},
 			},
-			"keda", &KafkaConfig{Brokers: "b", Topic: "t", ConsumerGroup: "g"}, 0,
+			"keda", &KafkaConfig{Brokers: "b", Topic: "t", ConsumerGroup: "g"}, 1,
 		},
 		{
 			"empty keda triggers",
@@ -315,16 +337,16 @@ func Test_ValidateScale(t *testing.T) {
 			"keda", nil, 1,
 		},
 		{
-			"keda cron trigger missing fields",
+			"keda cron trigger is not yet supported",
 			&ScaleOptions{
 				KEDA: &KEDAScaleOptions{
 					Triggers: []KEDATrigger{{Type: "cron"}},
 				},
 			},
-			"keda", nil, 4,
+			"keda", nil, 1,
 		},
 		{
-			"valid keda cron trigger",
+			"fully specified keda cron trigger is still not yet supported",
 			&ScaleOptions{
 				KEDA: &KEDAScaleOptions{
 					Triggers: []KEDATrigger{
@@ -332,7 +354,7 @@ func Test_ValidateScale(t *testing.T) {
 					},
 				},
 			},
-			"keda", nil, 0,
+			"keda", nil, 1,
 		},
 		{
 			"keda requires deployer keda",
@@ -382,6 +404,46 @@ func Test_ValidateScale(t *testing.T) {
 				},
 			},
 			"keda", nil, 1,
+		},
+		{
+			"keda max 0 is invalid: not a valid HPA maxReplicas",
+			&ScaleOptions{
+				Max:  ptr.Int64(0),
+				KEDA: &KEDAScaleOptions{Triggers: []KEDATrigger{{Type: "http"}}},
+			},
+			"keda", nil, 1,
+		},
+		{
+			"knative max 0 means no limit, still valid",
+			&ScaleOptions{
+				Max: ptr.Int64(0),
+				KPA: &KPAScaleOptions{Metric: ptr.String("concurrency")},
+			},
+			"knative", nil, 0,
+		},
+		{
+			"duplicate http triggers rejected",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{
+					Triggers: []KEDATrigger{
+						{Type: "http", TargetValue: ptr.Int64(100)},
+						{Type: "http", TargetValue: ptr.Int64(200)},
+					},
+				},
+			},
+			"keda", nil, 1,
+		},
+		{
+			"duplicate kafka triggers rejected",
+			&ScaleOptions{
+				KEDA: &KEDAScaleOptions{
+					Triggers: []KEDATrigger{
+						{Type: "kafka", LagThreshold: ptr.Int64(5)},
+						{Type: "kafka", LagThreshold: ptr.Int64(10)},
+					},
+				},
+			},
+			"keda", &KafkaConfig{Brokers: "b", Topic: "t", ConsumerGroup: "g"}, 1,
 		},
 	}
 

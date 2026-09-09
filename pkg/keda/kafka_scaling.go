@@ -46,6 +46,15 @@ func triggers(f fn.Function) []fn.KEDATrigger {
 	if f.Scale != nil && f.Scale.KEDA != nil {
 		return f.Scale.KEDA.Triggers
 	}
+	if f.Scale != nil && f.Scale.KPA != nil {
+		// scale.kpa is incompatible with deployer: keda (ValidateScale
+		// rejects it), but Deploy is reachable without validation first:
+		// falling back to the default http trigger here would silently
+		// treat this as "no scale.keda configured" instead of surfacing
+		// the mismatch. An empty trigger list makes Deploy's existing
+		// empty-triggers guard reject it instead.
+		return nil
+	}
 	return []fn.KEDATrigger{{Type: "http"}}
 }
 
@@ -85,7 +94,7 @@ func needsTriggerAuth(kafka *fn.KafkaConfig) bool {
 	if kafka.SASL != nil && kafka.SASL.Password != "" {
 		return true
 	}
-	if kafka.TLS != nil && kafka.TLS.CACert != "" {
+	if kafka.TLS != nil && (kafka.TLS.CACert != "" || kafka.TLS.ClientCert != "" || kafka.TLS.ClientKey != "") {
 		return true
 	}
 	return false
@@ -93,16 +102,16 @@ func needsTriggerAuth(kafka *fn.KafkaConfig) bool {
 
 // parseSecretRef extracts the secret name and key from a {{ secret:name:key }}
 // reference. Returns empty strings if the value is not a secret reference.
+// Uses fn.TemplateRefPattern -- the same pattern fn.Function.Validate and
+// pkg/k8s/deployer.go's env wiring match against -- so a malformed
+// {{ ... }} value is treated the same way everywhere instead of being
+// accepted here via ad-hoc trim/split and looked up as a mismatched secret.
 func parseSecretRef(value string) (secretName, secretKey string) {
-	if !strings.HasPrefix(value, "{{") {
+	matches := fn.TemplateRefPattern.FindStringSubmatch(value)
+	if matches == nil || matches[1] != "secret" {
 		return
 	}
-	trimmed := strings.Trim(value, "{} ")
-	parts := strings.Split(trimmed, ":")
-	if len(parts) == 3 && strings.TrimSpace(parts[0]) == "secret" {
-		return strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2])
-	}
-	return
+	return matches[2], matches[3]
 }
 
 // findSecretForPath finds the volume secret name that backs a given file path.
@@ -112,10 +121,19 @@ func findSecretForPath(certPath string, volumes []fn.Volume) (secretName, key st
 		if v.Secret == nil || v.Path == nil {
 			continue
 		}
-		mountPath := *v.Path
-		if strings.HasPrefix(certPath, mountPath) {
-			rel, err := filepath.Rel(mountPath, certPath)
+		mountPath := filepath.Clean(*v.Path)
+		cp := filepath.Clean(certPath)
+		if cp == mountPath || strings.HasPrefix(cp, mountPath+string(filepath.Separator)) {
+			rel, err := filepath.Rel(mountPath, cp)
 			if err != nil {
+				continue
+			}
+			// func mounts a Secret volume at a single directory level, so its
+			// data keys are plain filenames: certPath == mountPath (rel == ".")
+			// names the directory, not a file in it, and a rel containing a
+			// separator names a file nested more than one level deep. Neither
+			// is a valid Secret data key.
+			if rel == "." || strings.ContainsRune(rel, filepath.Separator) {
 				continue
 			}
 			return *v.Secret, rel
@@ -124,11 +142,45 @@ func findSecretForPath(certPath string, volumes []fn.Volume) (secretName, key st
 	return
 }
 
-// buildTriggerAuth creates the unstructured TriggerAuthentication for Kafka SASL/TLS.
-func buildTriggerAuth(f fn.Function, deployment *v1.Deployment, namespace string) *unstructured.Unstructured {
+// validateKafkaTLSPaths checks that any explicitly-configured
+// run.kafka.tls path (caCert/clientCert/clientKey) resolves to a
+// configured volume. Deliberately depends only on kafka/volumes -- no
+// live deployment object -- so it can run as a Deploy preflight guard,
+// before the raw Deployment/Service exist, and not just inside
+// buildTriggerAuth once one does.
+func validateKafkaTLSPaths(kafka *fn.KafkaConfig, volumes []fn.Volume) error {
+	if kafka == nil || kafka.TLS == nil {
+		return nil
+	}
+	if kafka.TLS.CACert != "" {
+		if name, _ := findSecretForPath(kafka.TLS.CACert, volumes); name == "" {
+			return fmt.Errorf("run.kafka.tls.caCert %q does not match any configured volume", kafka.TLS.CACert)
+		}
+	}
+	if kafka.TLS.ClientCert != "" {
+		if name, _ := findSecretForPath(kafka.TLS.ClientCert, volumes); name == "" {
+			return fmt.Errorf("run.kafka.tls.clientCert %q does not match any configured volume", kafka.TLS.ClientCert)
+		}
+	}
+	if kafka.TLS.ClientKey != "" {
+		if name, _ := findSecretForPath(kafka.TLS.ClientKey, volumes); name == "" {
+			return fmt.Errorf("run.kafka.tls.clientKey %q does not match any configured volume", kafka.TLS.ClientKey)
+		}
+	}
+	return nil
+}
+
+// buildTriggerAuth creates the unstructured TriggerAuthentication for Kafka
+// SASL/TLS. Returns a non-nil error when a TLS path is explicitly
+// configured but doesn't resolve to any configured volume -- distinct from
+// a field that was never set at all, which is silently skipped.
+func buildTriggerAuth(f fn.Function, deployment *v1.Deployment, namespace string) (*unstructured.Unstructured, error) {
 	kafka := f.Run.Kafka
 	if kafka == nil {
-		return nil
+		return nil, nil
+	}
+	if err := validateKafkaTLSPaths(kafka, f.Run.Volumes); err != nil {
+		return nil, err
 	}
 
 	var secretRefs []interface{}
@@ -141,6 +193,21 @@ func buildTriggerAuth(f fn.Function, deployment *v1.Deployment, namespace string
 				"parameter": "password",
 				"name":      secretName,
 				"key":       secretKey,
+			})
+		} else {
+			// Plaintext value: ends up as a literal KAFKA_SASL_PASSWORD env var
+			// on the function's container. A {{ configMap:... }} reference
+			// ends up as a KAFKA_SASL_PASSWORD env var too, but backed by a
+			// ConfigMapKeyRef instead of a literal value (see
+			// appendKafkaEnvValue in pkg/k8s/deployer.go). Either way the env
+			// var name is the same, so point KEDA at that name instead of a
+			// secretTargetRef. Plaintext is allowed here, at least for
+			// debugging purposes -- func doesn't force SASL credentials
+			// through Secrets.
+			envRefs = append(envRefs, map[string]interface{}{
+				"parameter":     "password",
+				"name":          "KAFKA_SASL_PASSWORD",
+				"containerName": deployment.Spec.Template.Spec.Containers[0].Name,
 			})
 		}
 
@@ -164,17 +231,42 @@ func buildTriggerAuth(f fn.Function, deployment *v1.Deployment, namespace string
 
 	if kafka.TLS != nil && kafka.TLS.CACert != "" {
 		caSecretName, caKey := findSecretForPath(kafka.TLS.CACert, f.Run.Volumes)
-		if caSecretName != "" {
-			secretRefs = append(secretRefs, map[string]interface{}{
-				"parameter": "ca",
-				"name":      caSecretName,
-				"key":       caKey,
-			})
+		if caSecretName == "" {
+			return nil, fmt.Errorf("run.kafka.tls.caCert %q does not match any configured volume", kafka.TLS.CACert)
 		}
+		secretRefs = append(secretRefs, map[string]interface{}{
+			"parameter": "ca",
+			"name":      caSecretName,
+			"key":       caKey,
+		})
+	}
+
+	if kafka.TLS != nil && kafka.TLS.ClientCert != "" {
+		certSecretName, certKey := findSecretForPath(kafka.TLS.ClientCert, f.Run.Volumes)
+		if certSecretName == "" {
+			return nil, fmt.Errorf("run.kafka.tls.clientCert %q does not match any configured volume", kafka.TLS.ClientCert)
+		}
+		secretRefs = append(secretRefs, map[string]interface{}{
+			"parameter": "cert",
+			"name":      certSecretName,
+			"key":       certKey,
+		})
+	}
+
+	if kafka.TLS != nil && kafka.TLS.ClientKey != "" {
+		keySecretName, keyKey := findSecretForPath(kafka.TLS.ClientKey, f.Run.Volumes)
+		if keySecretName == "" {
+			return nil, fmt.Errorf("run.kafka.tls.clientKey %q does not match any configured volume", kafka.TLS.ClientKey)
+		}
+		secretRefs = append(secretRefs, map[string]interface{}{
+			"parameter": "key",
+			"name":      keySecretName,
+			"key":       keyKey,
+		})
 	}
 
 	if len(secretRefs) == 0 && len(envRefs) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	spec := map[string]interface{}{}
@@ -194,12 +286,22 @@ func buildTriggerAuth(f fn.Function, deployment *v1.Deployment, namespace string
 				"namespace": namespace,
 				"ownerReferences": []interface{}{
 					map[string]interface{}{
-						"apiVersion":         "apps/v1",
-						"kind":               "Deployment",
-						"name":               deployment.Name,
-						"uid":                string(deployment.UID),
-						"controller":         true,
-						"blockOwnerDeletion": true,
+						// blockOwnerDeletion deliberately omitted: it only
+						// takes effect for foreground cascading deletion
+						// (unused here), but makes the
+						// OwnerReferencesPermissionEnforcement admission
+						// plugin require update on the owner's finalizers
+						// subresource -- a grant the deploying/pipeline
+						// service account doesn't hold by default, so the
+						// create is rejected outright on OpenShift, which
+						// enables that plugin (KinD doesn't). Same reasoning
+						// as the Service owner reference in
+						// pkg/k8s/deployer.go.
+						"apiVersion": "apps/v1",
+						"kind":       "Deployment",
+						"name":       deployment.Name,
+						"uid":        string(deployment.UID),
+						"controller": true,
 					},
 				},
 			},
@@ -207,7 +309,7 @@ func buildTriggerAuth(f fn.Function, deployment *v1.Deployment, namespace string
 		},
 	}
 
-	return ta
+	return ta, nil
 }
 
 // kedaSASLType maps func.yaml SASL mechanism names to KEDA trigger metadata values.
@@ -218,7 +320,7 @@ func kedaSASLType(mechanism string) string {
 	case "SCRAM-SHA-512":
 		return "scram_sha512"
 	case "PLAIN":
-		return "plain"
+		return "plaintext"
 	default:
 		return ""
 	}
@@ -247,8 +349,22 @@ func buildScaledObject(f fn.Function, trigger fn.KEDATrigger, deployment *v1.Dep
 		triggerMeta["activationLagThreshold"] = fmt.Sprintf("%d", *trigger.ActivationLagThreshold)
 	}
 
-	if kafka.TLS != nil {
+	if kafka.SecurityProtocol == "SSL" || kafka.SecurityProtocol == "SASL_SSL" {
+		// Enable KEDA's TLS handshake based on securityProtocol, not the
+		// presence of run.kafka.tls: a valid config can set SSL/SASL_SSL and
+		// rely on the system's CA trust store, with no explicit tls block at
+		// all. Gating on kafka.TLS != nil would leave KEDA attempting a
+		// plaintext connection for that config.
 		triggerMeta["tls"] = "enable"
+
+		if kafka.TLS != nil && kafka.TLS.SkipVerify {
+			// SkipVerify is propagated to the function's own container (see
+			// pkg/functions/runner.go), but KEDA's scaler connects to the
+			// broker independently -- without this, a self-signed broker
+			// lets the app's consumer connect while the scaler's own TLS
+			// handshake fails and the ScaledObject never scales, silently.
+			triggerMeta["unsafeSsl"] = "true"
+		}
 	}
 
 	if kafka.SASL != nil && kafka.SASL.Mechanism != "" {
@@ -275,12 +391,22 @@ func buildScaledObject(f fn.Function, trigger fn.KEDATrigger, deployment *v1.Dep
 				"namespace": namespace,
 				"ownerReferences": []interface{}{
 					map[string]interface{}{
-						"apiVersion":         "apps/v1",
-						"kind":               "Deployment",
-						"name":               deployment.Name,
-						"uid":                string(deployment.UID),
-						"controller":         true,
-						"blockOwnerDeletion": true,
+						// blockOwnerDeletion deliberately omitted: it only
+						// takes effect for foreground cascading deletion
+						// (unused here), but makes the
+						// OwnerReferencesPermissionEnforcement admission
+						// plugin require update on the owner's finalizers
+						// subresource -- a grant the deploying/pipeline
+						// service account doesn't hold by default, so the
+						// create is rejected outright on OpenShift, which
+						// enables that plugin (KinD doesn't). Same reasoning
+						// as the Service owner reference in
+						// pkg/k8s/deployer.go.
+						"apiVersion": "apps/v1",
+						"kind":       "Deployment",
+						"name":       deployment.Name,
+						"uid":        string(deployment.UID),
+						"controller": true,
 					},
 				},
 			},
@@ -336,6 +462,11 @@ func ensureScaledObject(ctx context.Context, dynClient dynamic.Interface, so *un
 	}
 
 	so.SetResourceVersion(existing.GetResourceVersion())
+	// KEDA attaches its own finalizer to a ScaledObject it's managing; this
+	// Update is a full replace, so without carrying it over, a redeploy
+	// would silently strip it and let a later delete bypass KEDA's cleanup
+	// ordering (see the note on this in kafka_scaling_int_test.go).
+	so.SetFinalizers(existing.GetFinalizers())
 	if _, err := client.Update(ctx, so, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("failed to update ScaledObject %s/%s: %w", ns, name, err)
 	}
@@ -360,13 +491,21 @@ func ensureTriggerAuth(ctx context.Context, dynClient dynamic.Interface, ta *uns
 	}
 
 	ta.SetResourceVersion(existing.GetResourceVersion())
+	// Same reasoning as ensureScaledObject: preserve KEDA's own finalizer
+	// across this full-replace Update instead of silently dropping it.
+	ta.SetFinalizers(existing.GetFinalizers())
 	if _, err := client.Update(ctx, ta, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("failed to update TriggerAuthentication %s/%s: %w", ns, name, err)
 	}
 	return nil
 }
 
-// deleteScaledObject removes a ScaledObject if it exists.
+// deleteScaledObject removes a ScaledObject if it exists. A nil return
+// means the delete was accepted, not that the object is actually gone yet:
+// KEDA attaches its own finalizer to this resource, so removal completes
+// asynchronously once KEDA's controller processes it. Callers that
+// immediately create a replacement scaler accept this as a rare,
+// self-correcting race rather than polling for actual removal here.
 func deleteScaledObject(ctx context.Context, dynClient dynamic.Interface, ns, name string) error {
 	client := dynClient.Resource(scaledObjectGVR).Namespace(ns)
 	err := client.Delete(ctx, name, metav1.DeleteOptions{})
@@ -376,7 +515,8 @@ func deleteScaledObject(ctx context.Context, dynClient dynamic.Interface, ns, na
 	return nil
 }
 
-// deleteTriggerAuth removes a TriggerAuthentication if it exists.
+// deleteTriggerAuth removes a TriggerAuthentication if it exists. Same
+// finalizer/async-removal caveat as deleteScaledObject.
 func deleteTriggerAuth(ctx context.Context, dynClient dynamic.Interface, ns, name string) error {
 	client := dynClient.Resource(triggerAuthGVR).Namespace(ns)
 	err := client.Delete(ctx, name, metav1.DeleteOptions{})

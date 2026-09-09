@@ -251,3 +251,31 @@ func Test_validateExposure(t *testing.T) {
 		t.Errorf("expected a nil exposer to skip exposure validation, got: %v", err)
 	}
 }
+
+// TestReplicaBounds_MaxBelowOne documents the precondition Deploy's
+// maxScale < 1 guard depends on: ValidateScale rejects scale.max: 0 for
+// deployer: keda, but Deploy is reachable without going through
+// Function.Validate first (library callers, tests), so replicaBounds can
+// still hand back a maxScale that would produce an invalid (< 1) HPA
+// maxReplicas if Deploy didn't check it itself.
+func TestReplicaBounds_MaxBelowOne(t *testing.T) {
+	zero := int64(0)
+	f := fn.Function{Scale: &fn.ScaleOptions{Max: &zero}}
+	_, max := replicaBounds(f)
+	if max >= 1 {
+		t.Fatalf("expected replicaBounds to pass scale.max: 0 through unchecked, got max=%d", max)
+	}
+}
+
+// TestReplicaBounds_MinAboveMax documents the precondition Deploy's
+// minScale > maxScale guard depends on: replicaBounds itself doesn't
+// enforce scale.min <= scale.max, so an inconsistent pair reaches Deploy
+// unchecked for callers that bypass Function.Validate.
+func TestReplicaBounds_MinAboveMax(t *testing.T) {
+	min, max := int64(5), int64(3)
+	f := fn.Function{Scale: &fn.ScaleOptions{Min: &min, Max: &max}}
+	gotMin, gotMax := replicaBounds(f)
+	if gotMin <= gotMax {
+		t.Fatalf("expected replicaBounds to pass scale.min > scale.max through unchecked, got min=%d max=%d", gotMin, gotMax)
+	}
+}
