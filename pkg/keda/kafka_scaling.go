@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 	fn "knative.dev/func/pkg/functions"
 )
@@ -34,6 +35,30 @@ func scaledObjectName(funcName string) string {
 
 func triggerAuthName(funcName string) string {
 	return funcName + "-kafka-auth"
+}
+
+// validateKafkaResourceNames refuses a function whose Kafka scaler resource
+// names would not be valid DNS-1035 labels. buildScaledObject names the
+// ScaledObject <name>-kafka and, when credentials are configured,
+// buildTriggerAuth names the TriggerAuthentication <name>-kafka-auth -- suffixes
+// that push a ~63-character function name past the 63-character limit, so the
+// API server rejects the resource for an otherwise valid function. This is the
+// Kafka-path counterpart to validateBridgeName on the HTTP path; needAuth
+// selects the longest suffix that will actually be created.
+func validateKafkaResourceNames(name string, needAuth bool) error {
+	// triggerAuthName's suffix is the longer of the two, so when auth is
+	// configured its name is the binding constraint; otherwise only the
+	// ScaledObject is created.
+	longest := scaledObjectName(name)
+	if needAuth {
+		longest = triggerAuthName(name)
+	}
+	if errs := validation.IsDNS1035Label(longest); len(errs) > 0 {
+		return fmt.Errorf(
+			"function name %q is too long for the keda deployer: its Kafka scaler resource would be named %q, which is not a valid name (%s)",
+			name, longest, strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // triggers returns the function's explicitly configured KEDA triggers, or a

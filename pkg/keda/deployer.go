@@ -3,6 +3,7 @@ package keda
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -154,6 +155,15 @@ func (d *Deployer) Deploy(ctx context.Context, f fn.Function) (fn.DeploymentResu
 			return fn.DeploymentResult{}, err
 		}
 	}
+	if wantKafka {
+		// Counterpart to validateBridgeName above: the Kafka path names its
+		// ScaledObject/TriggerAuthentication by appending suffixes to f.Name,
+		// which can overflow the 63-character DNS label limit and fail
+		// resource creation server-side with no preflight otherwise.
+		if err := validateKafkaResourceNames(f.Name, needsTriggerAuth(f.Run.Kafka)); err != nil {
+			return fn.DeploymentResult{}, err
+		}
+	}
 
 	// The following are all pure functions of f -- no cluster state needed --
 	// so they run before d.Deployer.Deploy creates anything. ValidateScale
@@ -162,6 +172,19 @@ func (d *Deployer) Deploy(ctx context.Context, f fn.Function) (fn.DeploymentResu
 	// before the raw Deployment/Service exist, rather than after, avoids
 	// leaving a partial workload behind with no Kafka scaler and no error
 	// pointing at why.
+	if f.Scale != nil {
+		// scale.min/max are int64 in func.yaml but replicaBounds narrows them
+		// to int32 (Kubernetes replica counts). Reject values that would not
+		// survive the narrowing before it silently wraps -- e.g. 1<<32 casts
+		// to int32(0), which would otherwise slip past the maxScale >= 1 check
+		// below as a bogus value.
+		if f.Scale.Min != nil && (*f.Scale.Min < 0 || *f.Scale.Min > math.MaxInt32) {
+			return fn.DeploymentResult{}, fmt.Errorf("function %q: scale.min %d is out of range [0, %d]", f.Name, *f.Scale.Min, math.MaxInt32)
+		}
+		if f.Scale.Max != nil && (*f.Scale.Max < 0 || *f.Scale.Max > math.MaxInt32) {
+			return fn.DeploymentResult{}, fmt.Errorf("function %q: scale.max %d is out of range [0, %d]", f.Name, *f.Scale.Max, math.MaxInt32)
+		}
+	}
 	minScale, maxScale := replicaBounds(f)
 	if maxScale < 1 {
 		// deployer: keda's HTTPScaledObject/ScaledObject map scale.max

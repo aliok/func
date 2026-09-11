@@ -3,6 +3,7 @@ package keda
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -339,6 +340,62 @@ func TestDeploy_KafkaSASLPreflight(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestDeploy_KafkaResourceNamePreflight covers the Deploy preflight guard for a
+// function whose name is too long for the Kafka scaler resources: the
+// ScaledObject (<name>-kafka) and TriggerAuthentication (<name>-kafka-auth)
+// suffixes can overflow the 63-character DNS label limit, which would otherwise
+// only surface as a server-side rejection mid-deploy. The check returns from the
+// pure preflight before any cluster call.
+func TestDeploy_KafkaResourceNamePreflight(t *testing.T) {
+	kafkaTrigger := &fn.ScaleOptions{
+		KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "kafka"}}},
+	}
+	// 58 chars: 58 + len("-kafka") == 64 > 63, so the ScaledObject name alone
+	// overflows even without credentials configured.
+	tooLong := strings.Repeat("a", 58)
+
+	d := NewDeployer()
+	_, err := d.Deploy(context.Background(), fn.Function{Name: tooLong, Scale: kafkaTrigger})
+	if err == nil {
+		t.Fatal("expected Deploy to reject an over-long function name, got nil error")
+	}
+	if !strings.Contains(err.Error(), "too long for the keda deployer") {
+		t.Fatalf("error %q does not mention the name-length limit", err.Error())
+	}
+}
+
+// TestDeploy_ScaleOverflowPreflight covers the Deploy preflight guard against
+// scale.min/max values that do not fit int32: replicaBounds narrows them to
+// int32, and 1<<32 would silently wrap to 0 (and then masquerade as a valid
+// small value) without this check.
+func TestDeploy_ScaleOverflowPreflight(t *testing.T) {
+	overflow := int64(math.MaxInt32) + 1
+	valid := int64(3)
+	trigger := &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "kafka"}}}
+
+	tests := []struct {
+		name    string
+		scale   *fn.ScaleOptions
+		wantErr string
+	}{
+		{"max overflow", &fn.ScaleOptions{Max: &overflow, KEDA: trigger}, "scale.max"},
+		{"min overflow", &fn.ScaleOptions{Min: &overflow, Max: &valid, KEDA: trigger}, "scale.min"},
+	}
+
+	d := NewDeployer()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := d.Deploy(context.Background(), fn.Function{Name: testFnName, Scale: tt.scale})
+			if err == nil {
+				t.Fatalf("expected Deploy to reject %s, got nil error", tt.name)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), "out of range") {
+				t.Fatalf("error %q is not the expected out-of-range error", err.Error())
 			}
 		})
 	}

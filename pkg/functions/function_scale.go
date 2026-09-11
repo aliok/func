@@ -1,6 +1,9 @@
 package functions
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // ValidateScale validates the top-level scale configuration against the chosen
 // deployer and Kafka config. It replaces the previous validateScaleDeployer,
@@ -18,6 +21,16 @@ func ValidateScale(scale *ScaleOptions, deployer string, kafka *KafkaConfig) (er
 	}
 	if scale.Max != nil && *scale.Max < 0 {
 		errors = append(errors, fmt.Sprintf("scale.max has invalid value: %d, must be >= 0", *scale.Max))
+	}
+	// scale.min/max are int64 in func.yaml, but Kubernetes replica counts are
+	// int32 and both deployers narrow to it (see replicaBounds in the keda
+	// deployer). Reject anything that would not survive that narrowing before
+	// it silently wraps -- e.g. 1<<32 casts to int32(0).
+	if scale.Min != nil && *scale.Min > math.MaxInt32 {
+		errors = append(errors, fmt.Sprintf("scale.min has invalid value: %d, must be <= %d", *scale.Min, math.MaxInt32))
+	}
+	if scale.Max != nil && *scale.Max > math.MaxInt32 {
+		errors = append(errors, fmt.Sprintf("scale.max has invalid value: %d, must be <= %d", *scale.Max, math.MaxInt32))
 	}
 	if scale.Min != nil && scale.Max != nil && *scale.Max < *scale.Min {
 		errors = append(errors, "scale.max must be >= scale.min")

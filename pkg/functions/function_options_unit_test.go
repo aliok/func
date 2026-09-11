@@ -240,6 +240,18 @@ func Test_ValidateScale(t *testing.T) {
 			"", nil, 1,
 		},
 		{
+			// 2147483648 == math.MaxInt32 + 1: does not fit the int32 both
+			// deployers narrow replica counts to (would wrap to 0).
+			"min above int32 max",
+			&ScaleOptions{Min: ptr.Int64(2147483648), Max: ptr.Int64(2147483648)},
+			"", nil, 2, // one for min, one for max
+		},
+		{
+			"max above int32 max",
+			&ScaleOptions{Max: ptr.Int64(2147483648)},
+			"", nil, 1,
+		},
+		{
 			"keda and kpa mutually exclusive",
 			&ScaleOptions{
 				KEDA: &KEDAScaleOptions{Triggers: []KEDATrigger{{Type: "http"}}},
