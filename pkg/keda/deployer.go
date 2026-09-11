@@ -150,6 +150,15 @@ func (d *Deployer) Deploy(ctx context.Context, f fn.Function) (fn.DeploymentResu
 			"function %q: scale.keda.triggers must not combine type http with type kafka: they cannot scale the same Deployment together, not yet supported", f.Name)
 	}
 
+	if pollingIntervalIgnored(f, wantHTTP, wantKafka) {
+		// Not fatal: the value is inert, not invalid. httpScaledObject scales
+		// off the KEDA HTTP add-on's interceptor metrics, which have no polling
+		// interval, so it never reads scale.keda.pollingInterval -- only a
+		// kafka trigger's ScaledObject honors it. Warn so a caller who set it
+		// expecting it to apply isn't left wondering why nothing changed.
+		fmt.Fprintf(os.Stderr, "Warning: scale.keda.pollingInterval is ignored for an http trigger (it applies only to kafka triggers); function %q\n", f.Name)
+	}
+
 	if wantHTTP {
 		if err := validateBridgeName(f.Name); err != nil {
 			return fn.DeploymentResult{}, err
@@ -566,6 +575,17 @@ const (
 	defaultMinReplicas int32 = 1
 	defaultMaxReplicas int32 = 10
 )
+
+// pollingIntervalIgnored reports whether scale.keda.pollingInterval is set
+// but will have no effect. Only a kafka trigger's ScaledObject honors it
+// (see buildScaledObjectSpec); the HTTPScaledObject scales off the KEDA HTTP
+// add-on's interceptor metrics, which have no polling interval, so
+// httpScaledObject never reads it. Deploy warns (rather than rejects) when
+// this holds. Pure so it can be unit-tested without capturing stderr.
+func pollingIntervalIgnored(f fn.Function, wantHTTP, wantKafka bool) bool {
+	return wantHTTP && !wantKafka &&
+		f.Scale != nil && f.Scale.KEDA != nil && f.Scale.KEDA.PollingInterval != nil
+}
 
 // replicaBounds is scale.min and scale.max from the function, or the
 // defaults above when either is unset. The HTTPScaledObject spec requires

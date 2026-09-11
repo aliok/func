@@ -299,6 +299,7 @@
 			"properties": {
 				"pollingInterval": {
 					"type": "integer",
+					"description": "How often KEDA checks the trigger in seconds (default 30). Applies only to kafka triggers; it has no effect on an http trigger (which scales from interceptor-reported metrics and has no polling concept).",
 					"minimum": 1
 				},
 				"cooldownPeriod": {

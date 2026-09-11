@@ -20,6 +20,7 @@ import (
 	fn "knative.dev/func/pkg/functions"
 	"knative.dev/func/pkg/k8s"
 	"knative.dev/func/pkg/ocproute"
+	"knative.dev/pkg/ptr"
 )
 
 const (
@@ -279,6 +280,38 @@ func TestReplicaBounds_MinAboveMax(t *testing.T) {
 	gotMin, gotMax := replicaBounds(f)
 	if gotMin <= gotMax {
 		t.Fatalf("expected replicaBounds to pass scale.min > scale.max through unchecked, got min=%d max=%d", gotMin, gotMax)
+	}
+}
+
+// TestPollingIntervalIgnored covers the predicate that gates Deploy's
+// "pollingInterval is ignored for http triggers" warning: only a kafka
+// trigger's ScaledObject honors scale.keda.pollingInterval, so it must warn
+// only for an http-only trigger that actually sets the value.
+func TestPollingIntervalIgnored(t *testing.T) {
+	interval := ptr.Int32(30)
+	withInterval := &fn.ScaleOptions{KEDA: &fn.KEDAScaleOptions{PollingInterval: interval}}
+	withoutInterval := &fn.ScaleOptions{KEDA: &fn.KEDAScaleOptions{}}
+
+	tests := []struct {
+		name                string
+		scale               *fn.ScaleOptions
+		wantHTTP, wantKafka bool
+		want                bool
+	}{
+		{"http-only with pollingInterval warns", withInterval, true, false, true},
+		{"http-only without pollingInterval is silent", withoutInterval, true, false, false},
+		{"kafka trigger honors pollingInterval, no warning", withInterval, false, true, false},
+		{"nil scale is silent", nil, true, false, false},
+		{"nil KEDA is silent", &fn.ScaleOptions{}, true, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := fn.Function{Name: testFnName, Scale: tt.scale}
+			if got := pollingIntervalIgnored(f, tt.wantHTTP, tt.wantKafka); got != tt.want {
+				t.Errorf("pollingIntervalIgnored() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
