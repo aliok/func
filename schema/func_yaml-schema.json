@@ -311,6 +311,7 @@
 						"$schema": "http://json-schema.org/draft-04/schema#",
 						"$ref": "#/definitions/KEDATrigger"
 					},
+					"minItems": 1,
 					"type": "array"
 				}
 			},

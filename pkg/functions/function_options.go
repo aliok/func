@@ -28,7 +28,7 @@ type KEDAScaleOptions struct {
 	// text at the first one.
 	PollingInterval *int32        `yaml:"pollingInterval,omitempty" jsonschema:"description=How often KEDA checks the trigger in seconds (default 30). Applies only to kafka triggers; it has no effect on an http trigger (which scales from interceptor-reported metrics and has no polling concept)." jsonschema_extras:"minimum=1"`
 	CooldownPeriod  *int32        `yaml:"cooldownPeriod,omitempty" jsonschema_extras:"minimum=1"`
-	Triggers        []KEDATrigger `yaml:"triggers,omitempty"`
+	Triggers        []KEDATrigger `yaml:"triggers,omitempty" jsonschema:"minItems=1"`
 }
 
 type KEDATrigger struct {

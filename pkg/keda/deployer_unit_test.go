@@ -433,3 +433,56 @@ func TestDeploy_ScaleOverflowPreflight(t *testing.T) {
 		})
 	}
 }
+
+// TestDeploy_ScaleValidationPreflight covers the shared-ValidateScale sweep the
+// Deploy preflight runs for direct callers that bypass Function.Validate: the
+// value-range checks the tailored guards above it don't duplicate
+// (pollingInterval/cooldownPeriod bounds, per-trigger threshold bounds, and the
+// scale.keda<->scale.kpa mutual exclusion). Each returns from the pure preflight
+// before any cluster call, so no fake clientset is needed.
+func TestDeploy_ScaleValidationPreflight(t *testing.T) {
+	httpTrigger := func() []fn.KEDATrigger { return []fn.KEDATrigger{{Type: "http"}} }
+
+	tests := []struct {
+		name    string
+		scale   *fn.ScaleOptions
+		wantErr string
+	}{
+		{
+			name:    "pollingInterval below minimum",
+			scale:   &fn.ScaleOptions{KEDA: &fn.KEDAScaleOptions{PollingInterval: ptr.Int32(0), Triggers: httpTrigger()}},
+			wantErr: "scale.keda.pollingInterval must be >= 1",
+		},
+		{
+			name:    "cooldownPeriod below minimum",
+			scale:   &fn.ScaleOptions{KEDA: &fn.KEDAScaleOptions{CooldownPeriod: ptr.Int32(0), Triggers: httpTrigger()}},
+			wantErr: "scale.keda.cooldownPeriod must be >= 1",
+		},
+		{
+			name:    "http targetValue below minimum",
+			scale:   &fn.ScaleOptions{KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "http", TargetValue: ptr.Int64(0)}}}},
+			wantErr: "targetValue must be >= 1",
+		},
+		{
+			name: "scale.keda and scale.kpa mutually exclusive",
+			scale: &fn.ScaleOptions{
+				KEDA: &fn.KEDAScaleOptions{Triggers: httpTrigger()},
+				KPA:  &fn.KPAScaleOptions{Metric: ptr.String("concurrency")},
+			},
+			wantErr: "mutually exclusive",
+		},
+	}
+
+	d := NewDeployer()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := d.Deploy(context.Background(), fn.Function{Name: testFnName, Scale: tt.scale})
+			if err == nil {
+				t.Fatalf("expected Deploy to reject %s, got nil error", tt.name)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}

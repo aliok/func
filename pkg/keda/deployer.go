@@ -247,6 +247,22 @@ func (d *Deployer) Deploy(ctx context.Context, f fn.Function) (fn.DeploymentResu
 		}
 	}
 
+	// Final sweep with the shared scale validator, for direct callers that
+	// bypass Function.Validate. The tailored guards above cover the cases
+	// worth a deploy-specific message (and their own tests); this catches the
+	// remaining ValidateScale checks they don't -- pollingInterval/
+	// cooldownPeriod bounds, per-trigger threshold bounds, and the
+	// scale.keda<->scale.kpa mutual exclusion -- so an invalid scaler config
+	// can't create/update the raw Deployment before KEDA rejects or silently
+	// ignores it. Gated on an explicit scale.keda/scale.kpa so the intentional
+	// default-http fallback (neither set -> triggers() supplies a plain http
+	// trigger) still deploys instead of tripping "keda requires a trigger".
+	if f.Scale != nil && (f.Scale.KEDA != nil || f.Scale.KPA != nil) {
+		if errs := fn.ValidateScale(f.Scale, KedaDeployerName, f.Run.Kafka); len(errs) > 0 {
+			return fn.DeploymentResult{}, fmt.Errorf("function %q: %s", f.Name, strings.Join(errs, "; "))
+		}
+	}
+
 	k8sClientset, err := k8s.NewKubernetesClientset()
 	if err != nil {
 		return fn.DeploymentResult{}, fmt.Errorf("failed to create K8sClientset: %v", err)
