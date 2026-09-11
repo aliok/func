@@ -287,6 +287,21 @@ run:
       path: /etc/kafka/ca
 ```
 
+**Scaling a Kafka consumer.** What a function consumes (`run.kafka`) is
+independent of how it is scaled (the [`scale.keda`](#scale) trigger). A Kafka
+consumer can be scaled by a `kafka` trigger (on consumer-group lag), by an
+`http` trigger, or held at a fixed replica count — all are valid. Two things to
+know when the consumer is *not* scaled by a `kafka` trigger:
+
+- With an `http` trigger (or the implicit HTTP default) and `scale.min: 0`, KEDA
+  scales the Deployment to zero whenever there is no HTTP traffic. That stops the
+  consumer, and because nothing sends it HTTP requests, lag grows with nothing to
+  wake it back up. Set `scale.min: 1` (or higher) to keep at least one consumer
+  running, or use a `kafka` trigger if you want lag itself to drive scaling.
+- An `http`/fixed trigger never scales on lag, so a positive `min` holds a fixed
+  number of consumers regardless of how far behind they fall. Use a `kafka`
+  trigger when throughput should follow lag.
+
 ### `runtime`
 
 The language runtime for your function. For example `python`.
