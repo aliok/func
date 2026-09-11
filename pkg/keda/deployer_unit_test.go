@@ -1,6 +1,7 @@
 package keda
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -277,5 +278,68 @@ func TestReplicaBounds_MinAboveMax(t *testing.T) {
 	gotMin, gotMax := replicaBounds(f)
 	if gotMin <= gotMax {
 		t.Fatalf("expected replicaBounds to pass scale.min > scale.max through unchecked, got min=%d max=%d", gotMin, gotMax)
+	}
+}
+
+// TestDeploy_KafkaSASLPreflight covers the Deploy preflight for direct callers
+// that bypass Function.Validate: an inconsistent SASL/security config must be
+// rejected before any cluster resources are created. Otherwise buildScaledObject
+// -- which only emits "sasl" trigger metadata for a non-empty mechanism -- would
+// produce a ScaledObject that connects without SASL while the function's own
+// container is configured for it. Each case returns from the pure preflight
+// before Deploy touches the cluster, so no fake clientset is needed.
+func TestDeploy_KafkaSASLPreflight(t *testing.T) {
+	kafkaTrigger := &fn.ScaleOptions{
+		KEDA: &fn.KEDAScaleOptions{Triggers: []fn.KEDATrigger{{Type: "kafka"}}},
+	}
+	base := func(k *fn.KafkaConfig) fn.Function {
+		return fn.Function{Name: testFnName, Scale: kafkaTrigger, Run: fn.RunSpec{Kafka: k}}
+	}
+
+	tests := []struct {
+		name    string
+		kafka   *fn.KafkaConfig
+		wantErr string
+	}{
+		{
+			name: "SASL_SSL with empty mechanism",
+			kafka: &fn.KafkaConfig{
+				Brokers: "b:9092", Topic: "t", ConsumerGroup: "g",
+				SecurityProtocol: "SASL_SSL",
+				SASL:             &fn.KafkaSASL{User: "u", Password: "p"},
+			},
+			wantErr: "run.kafka.sasl.mechanism is required",
+		},
+		{
+			name: "SASL block with non-SASL protocol",
+			kafka: &fn.KafkaConfig{
+				Brokers: "b:9092", Topic: "t", ConsumerGroup: "g",
+				SecurityProtocol: "SSL",
+				SASL:             &fn.KafkaSASL{Mechanism: "PLAIN", User: "u", Password: "p"},
+			},
+			wantErr: "run.kafka.sasl requires securityProtocol SASL_PLAINTEXT or SASL_SSL",
+		},
+		{
+			name: "unrecognized mechanism",
+			kafka: &fn.KafkaConfig{
+				Brokers: "b:9092", Topic: "t", ConsumerGroup: "g",
+				SecurityProtocol: "SASL_SSL",
+				SASL:             &fn.KafkaSASL{Mechanism: "OAUTHBEARER", User: "u", Password: "p"},
+			},
+			wantErr: "run.kafka.sasl.mechanism must be one of",
+		},
+	}
+
+	d := NewDeployer()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := d.Deploy(context.Background(), base(tt.kafka))
+			if err == nil {
+				t.Fatalf("expected Deploy to reject %s, got nil error", tt.name)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tt.wantErr)
+			}
+		})
 	}
 }

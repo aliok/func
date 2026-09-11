@@ -199,13 +199,20 @@ func (d *Deployer) Deploy(ctx context.Context, f fn.Function) (fn.DeploymentResu
 			return fn.DeploymentResult{}, fmt.Errorf("function %q: %w", f.Name, err)
 		}
 	}
-	if wantKafka && f.Run.Kafka != nil && f.Run.Kafka.SASL != nil && f.Run.Kafka.SASL.Mechanism != "" && kedaSASLType(f.Run.Kafka.SASL.Mechanism) == "" {
-		// kedaSASLType returns "" for anything it doesn't recognize, and
-		// buildScaledObject would set the trigger's "sasl" metadata to that
-		// empty string, producing an invalid KEDA trigger.
-		return fn.DeploymentResult{}, fmt.Errorf(
-			"function %q: run.kafka.sasl.mechanism %q is not supported, must be one of PLAIN, SCRAM-SHA-256, SCRAM-SHA-512",
-			f.Name, f.Run.Kafka.SASL.Mechanism)
+	if wantKafka && f.Run.Kafka != nil {
+		// Validate the securityProtocol/TLS/SASL consistency with the same
+		// rules Function.Validate applies, so a direct Deploy caller that
+		// bypasses it can't create a ScaledObject whose SASL/TLS metadata
+		// silently disagrees with how the function's own container
+		// authenticates. buildScaledObject only emits "sasl" metadata for a
+		// non-empty mechanism, so e.g. SASL_SSL with an empty mechanism would
+		// otherwise leave KEDA connecting without SASL at all. Excludes the
+		// runtime/invoke checks (a function-authoring concern, not a KEDA
+		// resource concern) and the broker/topic/consumerGroup checks (done
+		// above), so it doesn't reject valid direct-deploy inputs.
+		if errs := fn.ValidateKafkaSecurity(f.Run.Kafka); len(errs) > 0 {
+			return fn.DeploymentResult{}, fmt.Errorf("function %q: %s", f.Name, strings.Join(errs, "; "))
+		}
 	}
 
 	k8sClientset, err := k8s.NewKubernetesClientset()

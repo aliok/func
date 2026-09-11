@@ -240,6 +240,23 @@ func validateKafka(kafka *KafkaConfig, invoke, runtime string) (errors []string)
 		errors = append(errors, "run.kafka.consumerGroup is required when Kafka is configured")
 	}
 
+	errors = append(errors, ValidateKafkaSecurity(kafka)...)
+
+	return
+}
+
+// ValidateKafkaSecurity validates the securityProtocol/TLS/SASL consistency of a
+// Kafka config -- the subset of run.kafka validation that decides whether the
+// generated KEDA ScaledObject/TriggerAuthentication will authenticate the same
+// way the function's own container does. It deliberately excludes the
+// runtime/invoke/brokers/topic/consumerGroup checks so it can be reused as a
+// KEDA deployer preflight for direct Deploy callers that bypass
+// Function.Validate. A nil config is valid (returns no errors).
+func ValidateKafkaSecurity(kafka *KafkaConfig) (errors []string) {
+	if kafka == nil {
+		return
+	}
+
 	validProtocols := map[string]bool{"": true, "PLAINTEXT": true, "SSL": true, "SASL_PLAINTEXT": true, "SASL_SSL": true}
 	if !validProtocols[kafka.SecurityProtocol] {
 		errors = append(errors, "run.kafka.securityProtocol must be one of: PLAINTEXT, SSL, SASL_PLAINTEXT, SASL_SSL")
