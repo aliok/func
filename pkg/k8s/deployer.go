@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"regexp"
 	"sort"
@@ -674,6 +675,14 @@ func (d *Deployer) generateDeployment(f fn.Function, namespace string, labels, a
 
 	replicas := int32(1)
 	if f.Scale != nil && f.Scale.Min != nil && *f.Scale.Min > 0 {
+		// scale.min is int64 in func.yaml but the Deployment replica count is
+		// int32. ValidateScale rejects out-of-range values, but Deploy is
+		// reachable without it (library callers), so guard here too before the
+		// narrowing silently wraps -- e.g. int32(1<<32) == 0. Mirrors the
+		// preflight check in the keda deployer.
+		if *f.Scale.Min > math.MaxInt32 {
+			return nil, fmt.Errorf("function %q: scale.min %d is out of range [0, %d]", f.Name, *f.Scale.Min, math.MaxInt32)
+		}
 		replicas = int32(*f.Scale.Min)
 	}
 

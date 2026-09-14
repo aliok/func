@@ -164,7 +164,7 @@ Top-level autoscaling configuration. Settings are deployer-aware: `kpa` is used 
     - `kafka`: scales based on consumer group lag. Requires [`run.kafka`](#runkafka) to be configured.
       - `lagThreshold`: average consumer lag per partition that triggers scaling up. Default is 10.
       - `activationLagThreshold`: lag below which KEDA keeps replicas at 0 when `scale.min` is 0. Default is 0.
-    - `cron`: scales based on a time window.
+    - `cron`: scales based on a time window. **Not yet supported** — accepted by the schema but rejected at validation time (reserved for a future deployer implementation).
       - `timezone`: e.g. `Europe/Istanbul`.
       - `start`, `end`: cron expressions defining the active window, e.g. `0 8 * * *`.
       - `desiredReplicas`: number of replicas to scale to during the active window.
