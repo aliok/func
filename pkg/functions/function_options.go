@@ -15,9 +15,17 @@ type Options struct {
 	Resources *ResourcesOptions `yaml:"resources,omitempty"`
 }
 
+// On the min/max tags below: maximum is int32 max because both deployers narrow
+// min/max to the int32 Kubernetes replica count, so ValidateScale rejects
+// anything larger -- the schema is kept in step. minimum stays in
+// jsonschema_extras rather than the jsonschema tag because the latter omits a
+// zero-valued minimum. This block is deliberately not a field doc comment (a
+// blank line separates it from ScaleOptions) so it does not leak into the
+// generated schema as a description.
+
 type ScaleOptions struct {
-	Min  *int64            `yaml:"min,omitempty" jsonschema_extras:"minimum=0"`
-	Max  *int64            `yaml:"max,omitempty" jsonschema_extras:"minimum=0"`
+	Min  *int64            `yaml:"min,omitempty" jsonschema:"maximum=2147483647" jsonschema_extras:"minimum=0"`
+	Max  *int64            `yaml:"max,omitempty" jsonschema:"maximum=2147483647" jsonschema_extras:"minimum=0"`
 	KEDA *KEDAScaleOptions `yaml:"keda,omitempty"`
 	KPA  *KPAScaleOptions  `yaml:"kpa,omitempty"`
 }
@@ -26,9 +34,16 @@ type KEDAScaleOptions struct {
 	// The jsonschema description avoids commas: the alecthomas/jsonschema
 	// generator splits the jsonschema tag on commas and would truncate the
 	// text at the first one.
-	PollingInterval *int32        `yaml:"pollingInterval,omitempty" jsonschema:"description=How often KEDA checks the trigger in seconds (default 30). Applies only to kafka triggers; it has no effect on an http trigger (which scales from interceptor-reported metrics and has no polling concept)." jsonschema_extras:"minimum=1"`
-	CooldownPeriod  *int32        `yaml:"cooldownPeriod,omitempty" jsonschema_extras:"minimum=1"`
-	Triggers        []KEDATrigger `yaml:"triggers,omitempty" jsonschema:"minItems=1"`
+	PollingInterval *int32 `yaml:"pollingInterval,omitempty" jsonschema:"description=How often KEDA checks the trigger in seconds (default 30). Applies only to kafka triggers; it has no effect on an http trigger (which scales from interceptor-reported metrics and has no polling concept)." jsonschema_extras:"minimum=1"`
+	CooldownPeriod  *int32 `yaml:"cooldownPeriod,omitempty" jsonschema_extras:"minimum=1"`
+
+	// triggers has no omitempty: the schema generator derives "required" from
+	// its absence, matching ValidateScale (scale.keda requires >=1 trigger) so
+	// scale: {keda: {}} is rejected at schema time too. KEDAScaleOptions is only
+	// ever serialized for deployer: keda, where triggers is always populated.
+	// (Blank line above keeps this note out of the generated schema description.)
+
+	Triggers []KEDATrigger `yaml:"triggers" jsonschema:"minItems=1"`
 }
 
 type KEDATrigger struct {

@@ -408,7 +408,8 @@ func (d *Deployer) Deploy(ctx context.Context, f fn.Function) (fn.DeploymentResu
 
 	// Kafka trigger path: TriggerAuthentication + ScaledObject
 	if wantKafka && f.Run.Kafka != nil {
-		if needsTriggerAuth(f.Run.Kafka) {
+		needsAuth := needsTriggerAuth(f.Run.Kafka)
+		if needsAuth {
 			ta, err := buildTriggerAuth(f, deployment, namespace)
 			if err != nil {
 				// A TLS path was explicitly configured but doesn't resolve
@@ -430,14 +431,6 @@ func (d *Deployer) Deploy(ctx context.Context, f fn.Function) (fn.DeploymentResu
 			if err := ensureTriggerAuth(ctx, dynClient, ta); err != nil {
 				return fn.DeploymentResult{}, fmt.Errorf("failed to ensure TriggerAuthentication: %w", err)
 			}
-		} else {
-			// SASL/TLS credentials were removed from run.kafka while the
-			// kafka trigger stayed: a prior deploy may have left a
-			// TriggerAuthentication behind that nothing references anymore.
-			// Not fatal, same treatment as the no-kafka-at-all cleanup above.
-			if err := deleteTriggerAuth(ctx, dynClient, namespace, triggerAuthName(f.Name)); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: %v\n", err)
-			}
 		}
 
 		kt := kafkaTrigger(triggers)
@@ -445,6 +438,20 @@ func (d *Deployer) Deploy(ctx context.Context, f fn.Function) (fn.DeploymentResu
 		if so != nil {
 			if err := ensureScaledObject(ctx, dynClient, so); err != nil {
 				return fn.DeploymentResult{}, fmt.Errorf("failed to ensure ScaledObject: %w", err)
+			}
+		}
+
+		if !needsAuth {
+			// SASL/TLS credentials were removed from run.kafka while the kafka
+			// trigger stayed: a prior deploy may have left a
+			// TriggerAuthentication behind that nothing references anymore.
+			// Delete it only AFTER the ScaledObject above has been reconciled to
+			// drop its authenticationRef -- deleting first would, if that update
+			// then failed, leave the live ScaledObject pointing at a
+			// TriggerAuthentication that no longer exists. Not fatal, same
+			// treatment as the no-kafka-at-all cleanup above.
+			if err := deleteTriggerAuth(ctx, dynClient, namespace, triggerAuthName(f.Name)); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 			}
 		}
 	}

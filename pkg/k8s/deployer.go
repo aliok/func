@@ -674,16 +674,19 @@ func (d *Deployer) generateDeployment(f fn.Function, namespace string, labels, a
 	SetSecurityContext(&container)
 
 	replicas := int32(1)
-	if f.Scale != nil && f.Scale.Min != nil && *f.Scale.Min > 0 {
+	if f.Scale != nil && f.Scale.Min != nil {
 		// scale.min is int64 in func.yaml but the Deployment replica count is
 		// int32. ValidateScale rejects out-of-range values, but Deploy is
-		// reachable without it (library callers), so guard here too before the
-		// narrowing silently wraps -- e.g. int32(1<<32) == 0. Mirrors the
-		// preflight check in the keda deployer.
-		if *f.Scale.Min > math.MaxInt32 {
+		// reachable without it (library callers), so guard here too: a negative
+		// value would otherwise be silently normalized to one replica, and a
+		// value above int32 would wrap on narrowing -- e.g. int32(1<<32) == 0.
+		// Mirrors the preflight check in the keda deployer.
+		if *f.Scale.Min < 0 || *f.Scale.Min > math.MaxInt32 {
 			return nil, fmt.Errorf("function %q: scale.min %d is out of range [0, %d]", f.Name, *f.Scale.Min, math.MaxInt32)
 		}
-		replicas = int32(*f.Scale.Min)
+		if *f.Scale.Min > 0 {
+			replicas = int32(*f.Scale.Min)
+		}
 	}
 
 	deployment := &appsv1.Deployment{
