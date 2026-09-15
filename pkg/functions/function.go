@@ -370,7 +370,7 @@ type DeploySpec struct {
 	// ActiveDeployer records the deployer the Function is CURRENTLY DEPLOYED
 	// with: observed state, written after successful deployment, and cleared
 	// on undeploy alongside Namespace. User intent lives on Function.Deployer.
-	ActiveDeployer string `yaml:"activeDeployer,omitempty" jsonschema:"enum=knative,enum=raw,enum=keda"`
+	ActiveDeployer string `yaml:"deployer,omitempty" jsonschema:"enum=knative,enum=raw,enum=keda"`
 
 	Subscriptions []KnativeSubscription `yaml:"subscriptions,omitempty"`
 
@@ -384,7 +384,7 @@ type DeploySpec struct {
 	// deploy, cleared on undeploy alongside Namespace and ActiveDeployer.
 	// Empty means cluster-local (or never exposed). User intent lives on
 	// Function.Expose.
-	ActiveExpose string `yaml:"activeExpose,omitempty" jsonschema:"enum=route,enum=none,enum="`
+	ActiveExpose string `yaml:"expose,omitempty" jsonschema:"enum=route,enum=none,enum="`
 }
 
 // HealthEndpoints specify the liveness and readiness endpoints for a Runtime

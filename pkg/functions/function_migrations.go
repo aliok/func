@@ -408,19 +408,15 @@ func nestedString(v interface{}, keys ...string) string {
 }
 
 // migrateScaleToTopLevel moves scale config from deploy.options.scale to the
-// top-level scale field, moves the flat metric/target/utilization fields
-// (from pre-0.38.0 func.yaml files) into the kpa sub-key, and renames
-// DeploySpec's observed-state deploy.deployer/deploy.expose YAML keys to
-// deploy.activeDeployer/deploy.activeExpose (they collided in name with the
-// top-level deployer/expose fields -- user intent -- despite meaning the
-// opposite thing: observed, currently-deployed state).
+// top-level scale field and moves the flat metric/target/utilization fields
+// (from pre-0.38.0 func.yaml files) into the kpa sub-key.
 func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 	// Read the on-disk func.yaml to capture pre-migration fields that no
 	// longer deserialize under their current shape: the flat KPA fields
-	// (Metric, Target, Utilization), which no longer exist on ScaleOptions,
-	// and deploy.deployer/deploy.expose, since DeploySpec.ActiveDeployer/
-	// ActiveExpose (the Go fields the primary unmarshal reads into) now use
-	// different YAML tags (activeDeployer/activeExpose).
+	// (Metric, Target, Utilization), which no longer exist on ScaleOptions.
+	// deploy.deployer and deploy.expose keep their YAML tags; they are read
+	// here too so the migration stays self-contained for callers that pass a
+	// Function not populated via the primary unmarshal.
 	type oldScale struct {
 		Min         *int64            `yaml:"min,omitempty"`
 		Max         *int64            `yaml:"max,omitempty"`
@@ -451,7 +447,7 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 	}
 
 	// A pre-0.38.0 (in fact pre-#3953) func.yaml had no top-level deployer
-	// field at all: DeploySpec.Deployer (now ActiveDeployer) was the only
+	// field at all: deploy.deployer (DeploySpec.ActiveDeployer) was the only
 	// place a function's deployer was recorded, and it meant user intent,
 	// not observed state -- that split only exists since the top-level
 	// field was introduced (commit 65029640). Every deploy since then sets
@@ -460,7 +456,9 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 	// function deployed before that split existed. Treat the old value as
 	// the carried-forward intent too, not just observed state -- computed
 	// before anything below reads f.Deployer, so both the scale.kpa
-	// decision and the keda-defaults-to-http-trigger block see it.
+	// decision and the keda-defaults-to-http-trigger block see it. Read from
+	// disk rather than f.Deploy.ActiveDeployer so the migration is robust to
+	// callers that pass a Function not populated via the primary unmarshal.
 	if f.Deployer == "" && disk.Deploy.Deployer != "" {
 		f.Deployer = disk.Deploy.Deployer
 	}
@@ -533,11 +531,12 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 		}
 	}
 
-	// deploy.deployer/deploy.expose moved to deploy.activeDeployer/
-	// deploy.activeExpose. f.Root == "" (library callers) needs no handling
-	// here: the in-memory value already reflects whatever was set via the
-	// Go field name, unaffected by the YAML tag change, so there's nothing
-	// on disk to migrate from and nothing to fall back to.
+	// deploy.deployer and deploy.expose keep their YAML tags. Populate the
+	// observed-state fields from disk so the migration is self-contained
+	// regardless of how f was constructed. f.Root == "" (library callers)
+	// needs no handling here: the in-memory value already reflects whatever
+	// was set via the Go field name, so there's nothing on disk to migrate
+	// from and nothing to fall back to.
 	if disk.Deploy.Deployer != "" {
 		f.Deploy.ActiveDeployer = disk.Deploy.Deployer
 	}
