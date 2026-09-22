@@ -69,18 +69,27 @@ func (remover *Remover) Remove(ctx context.Context, name, ns string) error {
 		}
 	}
 
-	// Clean up Kafka scaling resources before deleting the Deployment.
-	// These have ownerReferences so they'd be garbage-collected, but
-	// explicit deletion avoids races with a slow GC. Errors here (both
-	// functions already ignore not-found) are not fatal to Remove: the
-	// owner reference still cleans these up eventually, but the user is
-	// warned so a persistent failure (e.g. missing RBAC) doesn't go
-	// unnoticed.
-	if err := deleteScaledObject(ctx, dynClient, ns, scaledObjectName(name)); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
-	}
-	if err := deleteTriggerAuth(ctx, dynClient, ns, triggerAuthName(name)); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	// Clean up Kafka scaling resources before deleting the Deployment, but
+	// only when the record on the Service says this function had them. These
+	// resources carry ownerReferences so they'd be garbage-collected anyway;
+	// the explicit deletion just avoids races with a slow GC. Deleting them
+	// speculatively for an http-only function -- which never created either
+	// -- would make `func delete`, run with the user's own credentials, fail
+	// with Forbidden on keda.sh resources the user may have no rights to and
+	// that never existed (Kubernetes checks authorization before existence).
+	// Anything a crash left unrecorded still carries the Deployment owner
+	// reference, so deleting the Deployment below collects it. Errors here
+	// (both functions ignore not-found) are not fatal to Remove, but the user
+	// is warned so a persistent failure doesn't go unnoticed.
+	if svc.Annotations[scalerTypeAnnotation] == scalerTypeKafka {
+		if err := deleteScaledObject(ctx, dynClient, ns, scaledObjectName(name)); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		}
+		if svc.Annotations[triggerAuthRecordedAnnotation] == "true" {
+			if err := deleteTriggerAuth(ctx, dynClient, ns, triggerAuthName(name)); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+			}
+		}
 	}
 
 	deploymentClient := clientset.AppsV1().Deployments(ns)

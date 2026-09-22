@@ -486,3 +486,118 @@ func TestDeploy_ScaleValidationPreflight(t *testing.T) {
 		})
 	}
 }
+
+// Test_readScalerRecord covers how Deploy's switch guard reads the scaler
+// record off the function's Service: a missing Service (or unresolvable
+// namespace) is "no prior scaler", a Service with no annotation predates the
+// record and reads as http, and a written record round-trips.
+func Test_readScalerRecord(t *testing.T) {
+	f := fn.Function{Name: testFnName, Namespace: testFnNS}
+
+	t.Run("no Service means no prior scaler", func(t *testing.T) {
+		// clientset with no Service for this function
+		clientset := fake.NewClientset()
+		typ, hasAuth, err := readScalerRecord(t.Context(), clientset, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ != "" || hasAuth {
+			t.Fatalf("got (%q, %v), want (\"\", false)", typ, hasAuth)
+		}
+	})
+
+	t.Run("unresolvable namespace means no prior scaler", func(t *testing.T) {
+		clientset := fake.NewClientset()
+		typ, _, err := readScalerRecord(t.Context(), clientset, fn.Function{Name: testFnName})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ != "" {
+			t.Fatalf("got %q, want \"\"", typ)
+		}
+	})
+
+	t.Run("Service without record reads as http", func(t *testing.T) {
+		clientset := newTestClientset(false, nil)
+		typ, hasAuth, err := readScalerRecord(t.Context(), clientset, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ != scalerTypeHTTP || hasAuth {
+			t.Fatalf("got (%q, %v), want (%q, false)", typ, hasAuth, scalerTypeHTTP)
+		}
+	})
+
+	t.Run("kafka record with auth round-trips", func(t *testing.T) {
+		clientset := newTestClientset(false, map[string]string{
+			scalerTypeAnnotation:          scalerTypeKafka,
+			triggerAuthRecordedAnnotation: "true",
+		})
+		typ, hasAuth, err := readScalerRecord(t.Context(), clientset, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ != scalerTypeKafka || !hasAuth {
+			t.Fatalf("got (%q, %v), want (%q, true)", typ, hasAuth, scalerTypeKafka)
+		}
+	})
+}
+
+// Test_recordScaler covers writing the scaler record onto the function's
+// Service: http clears any stale trigger-auth marker, kafka+auth sets it, and
+// a Service that cannot be updated surfaces an error.
+func Test_recordScaler(t *testing.T) {
+	get := func(t *testing.T, clientset *fake.Clientset) map[string]string {
+		t.Helper()
+		svc, err := clientset.CoreV1().Services(testFnNS).Get(t.Context(), testFnName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return svc.Annotations
+	}
+
+	t.Run("http record has no trigger-auth marker", func(t *testing.T) {
+		clientset := newTestClientset(false, nil)
+		if err := recordScaler(t.Context(), clientset, testFnNS, testFnName, scalerTypeHTTP, false); err != nil {
+			t.Fatal(err)
+		}
+		ann := get(t, clientset)
+		if ann[scalerTypeAnnotation] != scalerTypeHTTP {
+			t.Fatalf("scaler type = %q, want %q", ann[scalerTypeAnnotation], scalerTypeHTTP)
+		}
+		if _, ok := ann[triggerAuthRecordedAnnotation]; ok {
+			t.Fatalf("trigger-auth marker should be absent for http, got %q", ann[triggerAuthRecordedAnnotation])
+		}
+	})
+
+	t.Run("kafka+auth sets the trigger-auth marker", func(t *testing.T) {
+		clientset := newTestClientset(false, nil)
+		if err := recordScaler(t.Context(), clientset, testFnNS, testFnName, scalerTypeKafka, true); err != nil {
+			t.Fatal(err)
+		}
+		ann := get(t, clientset)
+		if ann[scalerTypeAnnotation] != scalerTypeKafka || ann[triggerAuthRecordedAnnotation] != "true" {
+			t.Fatalf("got (%q, %q), want (%q, \"true\")", ann[scalerTypeAnnotation], ann[triggerAuthRecordedAnnotation], scalerTypeKafka)
+		}
+	})
+
+	t.Run("switching to kafka without auth clears a stale marker", func(t *testing.T) {
+		clientset := newTestClientset(false, map[string]string{
+			scalerTypeAnnotation:          scalerTypeKafka,
+			triggerAuthRecordedAnnotation: "true",
+		})
+		if err := recordScaler(t.Context(), clientset, testFnNS, testFnName, scalerTypeKafka, false); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := get(t, clientset)[triggerAuthRecordedAnnotation]; ok {
+			t.Fatal("stale trigger-auth marker should have been cleared")
+		}
+	})
+
+	t.Run("a Service that cannot be updated errors", func(t *testing.T) {
+		clientset := newTestClientset(true, nil)
+		if err := recordScaler(t.Context(), clientset, testFnNS, testFnName, scalerTypeHTTP, false); err == nil {
+			t.Fatal("expected an error when the Service update fails")
+		}
+	})
+}
