@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
@@ -29,25 +30,12 @@ const (
 
 const (
 	// scalerTypeAnnotation records which KEDA scaler the last keda deploy
-	// provisioned for this function -- scalerTypeHTTP or scalerTypeKafka --
-	// on the function's Service, the same durable object the exposure record
-	// lives on. KEDA allows only one scaler per workload, and switching types
-	// requires the old scaler fully gone before the new one is admitted (its
-	// finalizer makes removal asynchronous). Rather than speculatively delete
-	// the other type's resources on every deploy -- which fails on clusters
-	// whose deploy ServiceAccount lacks the delete verb on keda.sh resources,
-	// since Kubernetes checks authorization before existence -- Deploy reads
-	// this record up front and refuses a type switch, telling the user to
-	// delete and redeploy. A missing record reads as http: that was the only
-	// keda scaler before this annotation existed.
+	// provisioned for this function -- scalerTypeHTTP or scalerTypeKafka -- on
+	// the function's Service, the same durable object the exposure record lives
+	// on. Deploy reads it to know the type it is switching from, and writes it
+	// after the new scaler is in place. Remove reads it to delete only the
+	// keda.sh resources this function actually had.
 	scalerTypeAnnotation = "function.knative.dev/keda-scaler"
-
-	// triggerAuthRecordedAnnotation records, for a kafka scaler, whether the
-	// last deploy created a TriggerAuthentication. Deploy and Remove consult
-	// it so they only ever delete a TriggerAuthentication that was actually
-	// created, instead of issuing a speculative delete for one that never
-	// existed.
-	triggerAuthRecordedAnnotation = "function.knative.dev/keda-trigger-auth"
 
 	scalerTypeHTTP  = "http"
 	scalerTypeKafka = "kafka"
@@ -299,34 +287,49 @@ func (d *Deployer) Deploy(ctx context.Context, f fn.Function) (fn.DeploymentResu
 		return fn.DeploymentResult{}, fmt.Errorf("failed to create dynamic client: %w", err)
 	}
 
-	// Refuse a scaler-type switch before anything is changed on the cluster.
-	// KEDA allows one scaler per workload, and its finalizer makes the old
-	// scaler's removal asynchronous, so switching http<->kafka in place races
-	// the admission webhook and can leave the function with no scaler at all.
-	// Read the type the last deploy recorded on the function's Service; if it
-	// differs from what this deploy wants, tell the user to delete and
-	// redeploy rather than deleting the other type's resources speculatively.
-	wantType := scalerTypeHTTP
-	if wantKafka {
-		wantType = scalerTypeKafka
-	}
-	priorType, priorHadAuth, err := readScalerRecord(ctx, k8sClientset, f)
-	if err != nil {
-		return fn.DeploymentResult{}, err
-	}
-	if priorType != "" && priorType != wantType {
-		return fn.DeploymentResult{}, fmt.Errorf(
-			"function %q is already deployed with %s scaling; switching to %s scaling in place is not "+
-				"supported because KEDA allows only one scaler per workload. Run `func delete` and then deploy again",
-			f.Name, priorType, wantType)
-	}
-
 	var interceptorNS string
 	var exposeRefusal error
 	if wantHTTP {
 		interceptorNS, exposeRefusal = interceptorNamespace(ctx, k8sClientset)
 		if err := d.validateExposure(f, exposeRefusal); err != nil {
 			return fn.DeploymentResult{}, err
+		}
+	}
+
+	// Switch scaler types in place, before the raw deploy mutates the
+	// Deployment. KEDA allows only one scaler per workload; when this deploy's
+	// type differs from the one the last deploy recorded on the Service, take
+	// the old scaler down first -- and wait for it to actually go, since KEDA's
+	// finalizer makes removal asynchronous and its admission webhook denies the
+	// new scaler while the old one still manages the Deployment. Doing this
+	// before the raw deploy means a teardown that cannot complete fails the
+	// deploy without having touched the workload. Gated on the recorded type: a
+	// first deploy and a same-type redeploy record no other type, so no delete
+	// is issued against keda.sh, and deploys keep working on clusters whose
+	// ServiceAccount lacks the delete verb (Kubernetes checks authorization
+	// before existence). Idempotent on a partial failure: the removal helpers
+	// skip a scaler already gone, so a retry proceeds.
+	wantType := scalerTypeHTTP
+	if wantKafka {
+		wantType = scalerTypeKafka
+	}
+	priorType, err := priorScalerType(ctx, k8sClientset, f)
+	if err != nil {
+		return fn.DeploymentResult{}, err
+	}
+	if priorType != "" && priorType != wantType {
+		switchNS, err := k8s.DeployNamespace(f)
+		if err != nil {
+			return fn.DeploymentResult{}, err
+		}
+		if wantHTTP {
+			if err := removeKafkaScaler(ctx, dynClient, switchNS, f.Name, k8s.DefaultWaitingTimeout); err != nil {
+				return fn.DeploymentResult{}, err
+			}
+		} else {
+			if err := removeHTTPScaler(ctx, k8sClientset, switchNS, f.Name, k8s.DefaultWaitingTimeout); err != nil {
+				return fn.DeploymentResult{}, err
+			}
 		}
 	}
 
@@ -347,11 +350,6 @@ func (d *Deployer) Deploy(ctx context.Context, f fn.Function) (fn.DeploymentResu
 	if err != nil {
 		return fn.DeploymentResult{}, fmt.Errorf("failed to get service %s/%s: %v", namespace, f.Name, err)
 	}
-
-	// No cross-type cleanup runs here: the switch guard above guarantees this
-	// deploy is provisioning the same scaler type the last one did (or the
-	// first for a new function), so there is never a scaler of the other type
-	// to remove. `func delete` reclaims the previous type's resources.
 
 	// HTTP trigger path: bridge Service + HTTPScaledObject
 	var url string
@@ -448,27 +446,24 @@ func (d *Deployer) Deploy(ctx context.Context, f fn.Function) (fn.DeploymentResu
 			}
 		}
 
-		if !needsAuth && priorHadAuth {
+		if !needsAuth {
 			// SASL/TLS credentials were removed from run.kafka while the kafka
-			// trigger stayed, and the record says a prior deploy created a
-			// TriggerAuthentication that nothing references anymore. Delete it
-			// only AFTER the ScaledObject above has been reconciled to drop its
-			// authenticationRef -- deleting first would, if that update then
-			// failed, leave the live ScaledObject pointing at a
-			// TriggerAuthentication that no longer exists. Gated on the record
-			// so a kafka deploy that never had credentials doesn't issue a
-			// speculative delete (Forbidden on tighter RBAC). Not fatal:
-			// owner-ref GC covers a failure.
-			if err := deleteTriggerAuth(ctx, dynClient, namespace, triggerAuthName(f.Name)); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: %v\n", err)
-			}
+			// trigger stayed, so a TriggerAuthentication a prior deploy created
+			// is now unreferenced. Delete it only AFTER the ScaledObject above
+			// has been reconciled to drop its authenticationRef -- deleting
+			// first would, if that update then failed, leave the live
+			// ScaledObject pointing at a TriggerAuthentication that no longer
+			// exists. deleteTriggerAuthIfExists checks presence first, so a
+			// kafka deploy that never had credentials issues no speculative
+			// delete (Forbidden on tighter RBAC). Not fatal: owner-ref GC
+			// covers a failure.
+			deleteTriggerAuthIfExists(ctx, dynClient, namespace, f.Name)
 		}
 	}
 
-	// Record the scaler type (and, for kafka, whether a TriggerAuthentication
-	// was created) so the next deploy can refuse a type switch up front and a
-	// later delete only removes what was actually created.
-	if err := recordScaler(ctx, k8sClientset, namespace, f.Name, wantType, wantKafka && needsTriggerAuth(f.Run.Kafka)); err != nil {
+	// Record the scaler type now that it is in place, so the next deploy knows
+	// what to switch from and describe/list can report it.
+	if err := recordScalerType(ctx, k8sClientset, namespace, f.Name, wantType); err != nil {
 		return fn.DeploymentResult{}, err
 	}
 
@@ -479,6 +474,50 @@ func (d *Deployer) Deploy(ctx context.Context, f fn.Function) (fn.DeploymentResu
 		Deployer:  KedaDeployerName,
 		Expose:    appliedExpose,
 	}, nil
+}
+
+// priorScalerType returns the scaler type the last deploy recorded on the
+// function's Service, or "" when the function was never deployed (no Service, or
+// no resolvable namespace). Read before the raw deploy so a scaler-type switch
+// can tear the old scaler down -- and fail, if it cannot -- before the
+// Deployment is mutated.
+func priorScalerType(ctx context.Context, clientset kubernetes.Interface, f fn.Function) (string, error) {
+	ns, err := k8s.DeployNamespace(f)
+	if err != nil {
+		return "", nil
+	}
+	svc, err := clientset.CoreV1().Services(ns).Get(ctx, f.Name, metav1.GetOptions{})
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to read keda scaler record on service %s/%s: %w", ns, f.Name, err)
+	}
+	return svc.Annotations[scalerTypeAnnotation], nil
+}
+
+// recordScalerType stamps the scaler type this deploy provisioned onto the
+// function's Service. Written last, once the scaler is in place, so the value
+// reflects what is actually running. Get->Update with conflict retry, mirroring
+// k8s.RecordExposure, since a concurrent deploy or operator may patch the
+// Service between the two calls.
+func recordScalerType(ctx context.Context, clientset kubernetes.Interface, ns, name, scalerType string) error {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		svc, err := clientset.CoreV1().Services(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if svc.Annotations == nil {
+			svc.Annotations = map[string]string{}
+		}
+		svc.Annotations[scalerTypeAnnotation] = scalerType
+		_, err = clientset.CoreV1().Services(ns).Update(ctx, svc, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("failed to record keda scaler type on service %q: %w", name, err)
+	}
+	return nil
 }
 
 // validateExposure refuses, before anything is created, an exposure this
@@ -608,57 +647,115 @@ func (d *Deployer) clearExposure(ctx context.Context, t deployTarget, recordedNS
 	return nil
 }
 
-// readScalerRecord returns the scaler type the last deploy recorded on the
-// function's Service, and whether it recorded a TriggerAuthentication. An
-// absent Service (never deployed) returns "" -- no prior scaler, nothing to
-// switch from. A Service with no record predates this annotation, when http
-// was the only keda scaler, so it reads as scalerTypeHTTP. A namespace that
-// can't be resolved likewise means the function was never deployed.
-func readScalerRecord(ctx context.Context, clientset kubernetes.Interface, f fn.Function) (scalerType string, hasAuth bool, err error) {
-	ns, err := k8s.DeployNamespace(f)
-	if err != nil {
-		return "", false, nil
-	}
-	svc, err := clientset.CoreV1().Services(ns).Get(ctx, f.Name, metav1.GetOptions{})
-	if err != nil {
-		if k8serrors.IsNotFound(err) {
-			return "", false, nil
+// removeKafkaScaler takes down the Kafka ScaledObject (and its companion
+// TriggerAuthentication) for a function switching to http scaling, waiting for
+// the ScaledObject to be fully gone before returning. It deletes only what
+// exists -- a Get precedes the Delete -- so an ordinary http redeploy that never
+// had a Kafka scaler issues no delete, and so cannot fail with Forbidden on
+// clusters whose deploy ServiceAccount lacks the delete verb on keda.sh
+// resources (Kubernetes checks authorization before existence). A real switch
+// that cannot delete the ScaledObject is fatal: leaving it would keep the
+// workload managed by the old scaler and make KEDA deny the new http scaler.
+func removeKafkaScaler(ctx context.Context, dynClient dynamic.Interface, ns, funcName string, timeout time.Duration) error {
+	soName := scaledObjectName(funcName)
+	soClient := dynClient.Resource(scaledObjectGVR).Namespace(ns)
+	_, err := soClient.Get(ctx, soName, metav1.GetOptions{})
+	switch {
+	case k8serrors.IsNotFound(err):
+		// No Kafka scaler present: nothing to switch away from.
+	case err != nil:
+		return fmt.Errorf("failed to check for an existing ScaledObject %s/%s: %w", ns, soName, err)
+	default:
+		if err := deleteScaledObject(ctx, dynClient, ns, soName); err != nil {
+			return fmt.Errorf("failed to remove the Kafka ScaledObject %s/%s while switching to http scaling: %w", ns, soName, err)
 		}
-		return "", false, fmt.Errorf("failed to read keda scaler record on service %s/%s: %w", ns, f.Name, err)
+		if err := waitForGone(ctx, timeout, func(ctx context.Context) error {
+			_, err := soClient.Get(ctx, soName, metav1.GetOptions{})
+			return err
+		}); err != nil {
+			return fmt.Errorf("the Kafka ScaledObject %s/%s was not fully removed in time; retry the deploy: %w", ns, soName, err)
+		}
 	}
-	t := svc.Annotations[scalerTypeAnnotation]
-	if t == "" {
-		t = scalerTypeHTTP
-	}
-	return t, svc.Annotations[triggerAuthRecordedAnnotation] == "true", nil
+	// The TriggerAuthentication has no one-scaler constraint; clean it up
+	// best-effort so a leftover doesn't linger, without failing the switch.
+	deleteTriggerAuthIfExists(ctx, dynClient, ns, funcName)
+	return nil
 }
 
-// recordScaler writes the scaler type -- and, for kafka, whether a
-// TriggerAuthentication was created -- onto the function's Service, mirroring
-// k8s.RecordExposure. Get->Update with conflict retry, since a concurrent
-// deploy or cluster operator may patch the Service between the two calls.
-func recordScaler(ctx context.Context, clientset kubernetes.Interface, ns, name, scalerType string, hasAuth bool) error {
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		svc, err := clientset.CoreV1().Services(ns).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		if svc.Annotations == nil {
-			svc.Annotations = map[string]string{}
-		}
-		svc.Annotations[scalerTypeAnnotation] = scalerType
-		if scalerType == scalerTypeKafka && hasAuth {
-			svc.Annotations[triggerAuthRecordedAnnotation] = "true"
-		} else {
-			delete(svc.Annotations, triggerAuthRecordedAnnotation)
-		}
-		_, err = clientset.CoreV1().Services(ns).Update(ctx, svc, metav1.UpdateOptions{})
-		return err
-	})
+// removeHTTPScaler takes down the HTTPScaledObject (and its companion
+// interceptor bridge Service) for a function switching to kafka scaling,
+// waiting for the HTTPScaledObject to be fully gone first. Like
+// removeKafkaScaler it deletes only what exists, so a kafka redeploy that never
+// had an http scaler issues no delete; a real switch that cannot delete the
+// HTTPScaledObject is fatal, because the HTTP add-on's internal ScaledObject
+// would keep managing the workload and KEDA would deny the new Kafka
+// ScaledObject.
+func removeHTTPScaler(ctx context.Context, clientset *kubernetes.Clientset, ns, funcName string, timeout time.Duration) error {
+	cs, err := NewHTTPScaledObjectClientset()
 	if err != nil {
-		return fmt.Errorf("failed to record keda scaler type on service %q: %w", name, err)
+		return fmt.Errorf("failed to create HTTPScaledObject clientset: %w", err)
+	}
+	hsoClient := cs.HttpV1alpha1().HTTPScaledObjects(ns)
+	_, err = hsoClient.Get(ctx, funcName, metav1.GetOptions{})
+	switch {
+	case k8serrors.IsNotFound(err):
+		// No http scaler present: nothing to switch away from.
+	case err != nil:
+		return fmt.Errorf("failed to check for an existing HTTPScaledObject %s/%s: %w", ns, funcName, err)
+	default:
+		if err := hsoClient.Delete(ctx, funcName, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("failed to remove the HTTPScaledObject %s/%s while switching to kafka scaling: %w", ns, funcName, err)
+		}
+		if err := waitForGone(ctx, timeout, func(ctx context.Context) error {
+			_, err := hsoClient.Get(ctx, funcName, metav1.GetOptions{})
+			return err
+		}); err != nil {
+			return fmt.Errorf("the HTTPScaledObject %s/%s was not fully removed in time; retry the deploy: %w", ns, funcName, err)
+		}
+	}
+	// The interceptor bridge Service carries the Deployment owner reference and
+	// has no one-scaler constraint; remove it best-effort.
+	bridge := interceptorBridgeServiceName(funcName)
+	if _, err := clientset.CoreV1().Services(ns).Get(ctx, bridge, metav1.GetOptions{}); err == nil {
+		if err := clientset.CoreV1().Services(ns).Delete(ctx, bridge, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+			fmt.Fprintf(os.Stderr, "warning: could not remove the stale interceptor bridge Service %s/%s: %v\n", ns, bridge, err)
+		}
 	}
 	return nil
+}
+
+// deleteTriggerAuthIfExists removes the function's Kafka TriggerAuthentication
+// when it is present, warning rather than failing. The Get first means a
+// function that never had one issues no delete (avoiding Forbidden on tighter
+// RBAC), and owner-ref GC collects anything a warned-past failure leaves behind.
+func deleteTriggerAuthIfExists(ctx context.Context, dynClient dynamic.Interface, ns, funcName string) {
+	taName := triggerAuthName(funcName)
+	if _, err := dynClient.Resource(triggerAuthGVR).Namespace(ns).Get(ctx, taName, metav1.GetOptions{}); err != nil {
+		// Not found, or we cannot look: nothing we should try to delete.
+		return
+	}
+	if err := deleteTriggerAuth(ctx, dynClient, ns, taName); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
+}
+
+// waitForGone polls get until it reports the object is gone (NotFound). KEDA's
+// finalizer makes a scaler's deletion asynchronous: Delete only sets a
+// deletionTimestamp, and the object lingers until KEDA's controller runs its
+// finalizer. KEDA's admission webhook denies a new scaler for the same workload
+// ("already managed by ...") while the old one lingers, so a type switch must
+// wait for the old scaler to actually disappear before creating the new one.
+func waitForGone(ctx context.Context, timeout time.Duration, get func(context.Context) error) error {
+	return wait.PollUntilContextTimeout(ctx, time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		err := get(ctx)
+		if k8serrors.IsNotFound(err) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return false, nil // still present; keep waiting
+	})
 }
 
 const (

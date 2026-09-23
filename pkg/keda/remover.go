@@ -69,27 +69,23 @@ func (remover *Remover) Remove(ctx context.Context, name, ns string) error {
 		}
 	}
 
-	// Clean up Kafka scaling resources before deleting the Deployment, but
-	// only when the record on the Service says this function had them. These
-	// resources carry ownerReferences so they'd be garbage-collected anyway;
-	// the explicit deletion just avoids races with a slow GC. Deleting them
-	// speculatively for an http-only function -- which never created either
-	// -- would make `func delete`, run with the user's own credentials, fail
-	// with Forbidden on keda.sh resources the user may have no rights to and
-	// that never existed (Kubernetes checks authorization before existence).
-	// Anything a crash left unrecorded still carries the Deployment owner
-	// reference, so deleting the Deployment below collects it. Errors here
-	// (both functions ignore not-found) are not fatal to Remove, but the user
-	// is warned so a persistent failure doesn't go unnoticed.
+	// Clean up Kafka scaling resources before deleting the Deployment, but only
+	// when the record on the Service says this function was scaled by kafka.
+	// They carry ownerReferences so they'd be garbage-collected with the
+	// Deployment anyway; the explicit deletion just avoids races with a slow GC.
+	// Gating on the record means an http-only function -- which never created
+	// either -- issues no delete against keda.sh, so `func delete`, run with the
+	// user's own credentials, doesn't fail with Forbidden on resources the user
+	// may have no rights to and that never existed (Kubernetes checks
+	// authorization before existence). The TriggerAuthentication is created only
+	// for a kafka function using SASL/TLS credentials, so it is deleted only if
+	// present. Errors here are warnings, not fatal: owner-ref GC still collects
+	// anything left behind when the Deployment goes.
 	if svc.Annotations[scalerTypeAnnotation] == scalerTypeKafka {
 		if err := deleteScaledObject(ctx, dynClient, ns, scaledObjectName(name)); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 		}
-		if svc.Annotations[triggerAuthRecordedAnnotation] == "true" {
-			if err := deleteTriggerAuth(ctx, dynClient, ns, triggerAuthName(name)); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: %v\n", err)
-			}
-		}
+		deleteTriggerAuthIfExists(ctx, dynClient, ns, name)
 	}
 
 	deploymentClient := clientset.AppsV1().Deployments(ns)

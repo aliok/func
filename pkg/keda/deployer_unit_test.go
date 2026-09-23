@@ -6,8 +6,10 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -487,28 +489,95 @@ func TestDeploy_ScaleValidationPreflight(t *testing.T) {
 	}
 }
 
-// Test_readScalerRecord covers how Deploy's switch guard reads the scaler
-// record off the function's Service: a missing Service (or unresolvable
-// namespace) is "no prior scaler", a Service with no annotation predates the
-// record and reads as http, and a written record round-trips.
-func Test_readScalerRecord(t *testing.T) {
-	f := fn.Function{Name: testFnName, Namespace: testFnNS}
+// Test_removeKafkaScaler covers the http-side of an in-place scaler switch:
+// with no Kafka scaler present it is a no-op that issues no delete (so a plain
+// http redeploy never touches keda.sh), and when a Kafka ScaledObject and its
+// TriggerAuthentication are present it removes both.
+func Test_removeKafkaScaler(t *testing.T) {
+	soName := scaledObjectName(testFnName)
+	taName := triggerAuthName(testFnName)
 
-	t.Run("no Service means no prior scaler", func(t *testing.T) {
-		// clientset with no Service for this function
-		clientset := fake.NewClientset()
-		typ, hasAuth, err := readScalerRecord(t.Context(), clientset, f)
-		if err != nil {
-			t.Fatal(err)
+	t.Run("no kafka scaler is a no-op with no delete", func(t *testing.T) {
+		dynClient := newScalingDynClient()
+		var deletes int
+		dynClient.PrependReactor("delete", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+			deletes++
+			return false, nil, nil
+		})
+		if err := removeKafkaScaler(t.Context(), dynClient, testFnNS, testFnName, time.Second); err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-		if typ != "" || hasAuth {
-			t.Fatalf("got (%q, %v), want (\"\", false)", typ, hasAuth)
+		if deletes != 0 {
+			t.Fatalf("expected no delete calls when nothing exists, got %d", deletes)
 		}
 	})
 
-	t.Run("unresolvable namespace means no prior scaler", func(t *testing.T) {
-		clientset := fake.NewClientset()
-		typ, _, err := readScalerRecord(t.Context(), clientset, fn.Function{Name: testFnName})
+	t.Run("removes an existing ScaledObject and TriggerAuthentication", func(t *testing.T) {
+		dynClient := newScalingDynClient(
+			unstructuredScaledObject(soName, testFnNS),
+			unstructuredTriggerAuth(taName, testFnNS),
+		)
+		if err := removeKafkaScaler(t.Context(), dynClient, testFnNS, testFnName, time.Second); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, err := dynClient.Resource(scaledObjectGVR).Namespace(testFnNS).Get(t.Context(), soName, metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
+			t.Errorf("expected ScaledObject gone, got err: %v", err)
+		}
+		if _, err := dynClient.Resource(triggerAuthGVR).Namespace(testFnNS).Get(t.Context(), taName, metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
+			t.Errorf("expected TriggerAuthentication gone, got err: %v", err)
+		}
+	})
+
+	// A real switch that cannot delete the ScaledObject must fail, not proceed
+	// to create an http scaler KEDA would then deny.
+	t.Run("a ScaledObject delete failure is fatal", func(t *testing.T) {
+		dynClient := newScalingDynClient(unstructuredScaledObject(soName, testFnNS))
+		dynClient.PrependReactor("delete", "scaledobjects", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, k8serrors.NewForbidden(schema.GroupResource{Group: "keda.sh", Resource: "scaledobjects"}, soName, fmt.Errorf("nope"))
+		})
+		if err := removeKafkaScaler(t.Context(), dynClient, testFnNS, testFnName, time.Second); err == nil {
+			t.Fatal("expected an error when the ScaledObject delete fails")
+		}
+	})
+}
+
+// Test_deleteTriggerAuthIfExists covers the in-type credential-drop cleanup:
+// it deletes an existing TriggerAuthentication and issues no delete when none
+// is present (so a kafka deploy that never had credentials never hits Forbidden
+// on tighter RBAC).
+func Test_deleteTriggerAuthIfExists(t *testing.T) {
+	taName := triggerAuthName(testFnName)
+
+	t.Run("deletes an existing TriggerAuthentication", func(t *testing.T) {
+		dynClient := newScalingDynClient(unstructuredTriggerAuth(taName, testFnNS))
+		deleteTriggerAuthIfExists(t.Context(), dynClient, testFnNS, testFnName)
+		if _, err := dynClient.Resource(triggerAuthGVR).Namespace(testFnNS).Get(t.Context(), taName, metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
+			t.Errorf("expected TriggerAuthentication gone, got err: %v", err)
+		}
+	})
+
+	t.Run("no TriggerAuthentication issues no delete", func(t *testing.T) {
+		dynClient := newScalingDynClient()
+		var deletes int
+		dynClient.PrependReactor("delete", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+			deletes++
+			return false, nil, nil
+		})
+		deleteTriggerAuthIfExists(t.Context(), dynClient, testFnNS, testFnName)
+		if deletes != 0 {
+			t.Fatalf("expected no delete calls when nothing exists, got %d", deletes)
+		}
+	})
+}
+
+// Test_priorScalerType covers reading the recorded scaler type before the raw
+// deploy: a missing Service (or unresolvable namespace) is "no prior scaler", a
+// Service with no annotation is likewise empty, and a recorded type round-trips.
+func Test_priorScalerType(t *testing.T) {
+	f := fn.Function{Name: testFnName, Namespace: testFnNS}
+
+	t.Run("no Service means no prior scaler", func(t *testing.T) {
+		typ, err := priorScalerType(t.Context(), fake.NewClientset(), f)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -517,86 +586,74 @@ func Test_readScalerRecord(t *testing.T) {
 		}
 	})
 
-	t.Run("Service without record reads as http", func(t *testing.T) {
-		clientset := newTestClientset(false, nil)
-		typ, hasAuth, err := readScalerRecord(t.Context(), clientset, f)
+	t.Run("unresolvable namespace means no prior scaler", func(t *testing.T) {
+		typ, err := priorScalerType(t.Context(), fake.NewClientset(), fn.Function{Name: testFnName})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if typ != scalerTypeHTTP || hasAuth {
-			t.Fatalf("got (%q, %v), want (%q, false)", typ, hasAuth, scalerTypeHTTP)
+		if typ != "" {
+			t.Fatalf("got %q, want \"\"", typ)
 		}
 	})
 
-	t.Run("kafka record with auth round-trips", func(t *testing.T) {
-		clientset := newTestClientset(false, map[string]string{
-			scalerTypeAnnotation:          scalerTypeKafka,
-			triggerAuthRecordedAnnotation: "true",
-		})
-		typ, hasAuth, err := readScalerRecord(t.Context(), clientset, f)
+	t.Run("Service without record is empty", func(t *testing.T) {
+		typ, err := priorScalerType(t.Context(), newTestClientset(false, nil), f)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if typ != scalerTypeKafka || !hasAuth {
-			t.Fatalf("got (%q, %v), want (%q, true)", typ, hasAuth, scalerTypeKafka)
+		if typ != "" {
+			t.Fatalf("got %q, want \"\"", typ)
+		}
+	})
+
+	t.Run("a recorded type round-trips", func(t *testing.T) {
+		clientset := newTestClientset(false, map[string]string{scalerTypeAnnotation: scalerTypeKafka})
+		typ, err := priorScalerType(t.Context(), clientset, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ != scalerTypeKafka {
+			t.Fatalf("got %q, want %q", typ, scalerTypeKafka)
 		}
 	})
 }
 
-// Test_recordScaler covers writing the scaler record onto the function's
-// Service: http clears any stale trigger-auth marker, kafka+auth sets it, and
-// a Service that cannot be updated surfaces an error.
-func Test_recordScaler(t *testing.T) {
-	get := func(t *testing.T, clientset *fake.Clientset) map[string]string {
+// Test_recordScalerType covers stamping the scaler type onto the function's
+// Service: a fresh stamp, overwriting a prior type on a switch, and surfacing
+// an error when the Service cannot be updated.
+func Test_recordScalerType(t *testing.T) {
+	read := func(t *testing.T, clientset *fake.Clientset) string {
 		t.Helper()
 		svc, err := clientset.CoreV1().Services(testFnNS).Get(t.Context(), testFnName, metav1.GetOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return svc.Annotations
+		return svc.Annotations[scalerTypeAnnotation]
 	}
 
-	t.Run("http record has no trigger-auth marker", func(t *testing.T) {
+	t.Run("stamps the scaler type", func(t *testing.T) {
 		clientset := newTestClientset(false, nil)
-		if err := recordScaler(t.Context(), clientset, testFnNS, testFnName, scalerTypeHTTP, false); err != nil {
+		if err := recordScalerType(t.Context(), clientset, testFnNS, testFnName, scalerTypeKafka); err != nil {
 			t.Fatal(err)
 		}
-		ann := get(t, clientset)
-		if ann[scalerTypeAnnotation] != scalerTypeHTTP {
-			t.Fatalf("scaler type = %q, want %q", ann[scalerTypeAnnotation], scalerTypeHTTP)
-		}
-		if _, ok := ann[triggerAuthRecordedAnnotation]; ok {
-			t.Fatalf("trigger-auth marker should be absent for http, got %q", ann[triggerAuthRecordedAnnotation])
+		if got := read(t, clientset); got != scalerTypeKafka {
+			t.Fatalf("got %q, want %q", got, scalerTypeKafka)
 		}
 	})
 
-	t.Run("kafka+auth sets the trigger-auth marker", func(t *testing.T) {
-		clientset := newTestClientset(false, nil)
-		if err := recordScaler(t.Context(), clientset, testFnNS, testFnName, scalerTypeKafka, true); err != nil {
+	t.Run("overwrites a prior type on a switch", func(t *testing.T) {
+		clientset := newTestClientset(false, map[string]string{scalerTypeAnnotation: scalerTypeKafka})
+		if err := recordScalerType(t.Context(), clientset, testFnNS, testFnName, scalerTypeHTTP); err != nil {
 			t.Fatal(err)
 		}
-		ann := get(t, clientset)
-		if ann[scalerTypeAnnotation] != scalerTypeKafka || ann[triggerAuthRecordedAnnotation] != "true" {
-			t.Fatalf("got (%q, %q), want (%q, \"true\")", ann[scalerTypeAnnotation], ann[triggerAuthRecordedAnnotation], scalerTypeKafka)
-		}
-	})
-
-	t.Run("switching to kafka without auth clears a stale marker", func(t *testing.T) {
-		clientset := newTestClientset(false, map[string]string{
-			scalerTypeAnnotation:          scalerTypeKafka,
-			triggerAuthRecordedAnnotation: "true",
-		})
-		if err := recordScaler(t.Context(), clientset, testFnNS, testFnName, scalerTypeKafka, false); err != nil {
-			t.Fatal(err)
-		}
-		if _, ok := get(t, clientset)[triggerAuthRecordedAnnotation]; ok {
-			t.Fatal("stale trigger-auth marker should have been cleared")
+		if got := read(t, clientset); got != scalerTypeHTTP {
+			t.Fatalf("got %q, want %q", got, scalerTypeHTTP)
 		}
 	})
 
 	t.Run("a Service that cannot be updated errors", func(t *testing.T) {
 		clientset := newTestClientset(true, nil)
-		if err := recordScaler(t.Context(), clientset, testFnNS, testFnName, scalerTypeHTTP, false); err == nil {
+		if err := recordScalerType(t.Context(), clientset, testFnNS, testFnName, scalerTypeHTTP); err == nil {
 			t.Fatal("expected an error when the Service update fails")
 		}
 	})
