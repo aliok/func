@@ -100,6 +100,7 @@ var migrations = []migration{
 	{"0.35.0", migrateFromInvokeStructure},
 	{"0.36.0", migratePersistentVolumeTypoFixup},
 	{"0.37.0", migrateGitToSource},
+	{"0.38.0", migrateScaleToTopLevel},
 	// New Migrations Here.
 }
 
@@ -404,6 +405,143 @@ func nestedString(v interface{}, keys ...string) string {
 	}
 	s, _ := v.(string)
 	return s
+}
+
+// migrateScaleToTopLevel moves scale config from deploy.options.scale to the
+// top-level scale field and moves the flat metric/target/utilization fields
+// (from pre-0.38.0 func.yaml files) into the kpa sub-key.
+func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
+	// Read the on-disk func.yaml to capture pre-migration fields that no
+	// longer deserialize under their current shape: the flat KPA fields
+	// (Metric, Target, Utilization), which no longer exist on ScaleOptions.
+	// deploy.deployer and deploy.expose keep their YAML tags; they are read
+	// here too so the migration stays self-contained for callers that pass a
+	// Function not populated via the primary unmarshal.
+	type oldScale struct {
+		Min         *int64           `yaml:"min,omitempty"`
+		Max         *int64           `yaml:"max,omitempty"`
+		Metric      *string          `yaml:"metric,omitempty"`
+		Target      *float64         `yaml:"target,omitempty"`
+		Utilization *float64         `yaml:"utilization,omitempty"`
+		KPA         *KPAScaleOptions `yaml:"kpa,omitempty"`
+	}
+	type oldOptions struct {
+		Scale *oldScale `yaml:"scale,omitempty"`
+	}
+	type oldDeploy struct {
+		Options  oldOptions `yaml:"options,omitempty"`
+		Deployer string     `yaml:"deployer,omitempty"`
+		Expose   string     `yaml:"expose,omitempty"`
+	}
+	var disk struct {
+		Deploy oldDeploy     `yaml:"deploy,omitempty"`
+		Scale  *ScaleOptions `yaml:"scale,omitempty"`
+	}
+
+	if f.Root != "" {
+		bb, err := os.ReadFile(filepath.Join(f.Root, FunctionFile))
+		if err == nil {
+			_ = yaml.Unmarshal(bb, &disk)
+		}
+	}
+
+	// NOTE: this migration deliberately does NOT recover a legacy
+	// deploy.deployer value into f.Deployer (intent). A pre-#3953 func.yaml
+	// recorded the deployer only under deploy.deployer, and losing that intent
+	// on a delete-then-redeploy is a real (if narrow) bug -- but it is a
+	// pre-existing issue on main, unrelated to this scale migration, and is
+	// tracked separately in https://github.com/knative/func/issues/4054. The
+	// normal deploy path already recovers the deployer from observed state
+	// (config.Apply falls back to f.Deploy.Deployer), so only the
+	// delete-then-redeploy edge case is affected.
+	// The on-disk value is the source of truth: it is read directly because
+	// the old flat metric/target/utilization fields no longer deserialize under
+	// the current ScaleOptions type. This means a caller that programmatically
+	// set f.Deploy.Options.Scale before Migrate() would have that in-memory
+	// value shadowed by whatever is on disk. An earlier migration does write it
+	// in-memory (migrateToSpecsStructure lifts the pre-specs options.scale into
+	// f.Deploy.Options.Scale), but only for files old enough that the disk read
+	// yields the pre-specs layout -- with nothing under deploy.options.scale on
+	// disk -- so the fallback below picks that value up rather than it being
+	// shadowed. Shadowing thus stays theoretical, and it is why the in-memory
+	// value is a fallback (below), used only when the disk read yields nothing.
+	old := disk.Deploy.Options.Scale
+	if old == nil && f.Deploy.Options.Scale != nil {
+		// f.Root is empty (library callers construct a Function without a
+		// backing file) or the on-disk read found nothing: fall back to the
+		// already-deserialized in-memory value instead of treating it as
+		// absent. It can't carry the old flat metric/target/utilization
+		// fields -- those no longer exist on the current ScaleOptions type,
+		// so there's nothing on this path to recover them from -- but its
+		// Min/Max/KPA must not be silently dropped.
+		mem := f.Deploy.Options.Scale
+		old = &oldScale{Min: mem.Min, Max: mem.Max, KPA: mem.KPA}
+	}
+
+	if old != nil {
+		newScale := &ScaleOptions{
+			Min: old.Min,
+			Max: old.Max,
+			KPA: old.KPA,
+		}
+
+		// scale.kpa is only valid for deployer: knative (or the unset/
+		// default deployer, which behaves as knative) -- see ValidateScale.
+		// Consider the observed deployer (deploy.deployer) as well as the
+		// intent (f.Deployer): a pre-#3953 keda/raw file recorded the deployer
+		// only under deploy.deployer, leaving f.Deployer empty. Keying on
+		// intent alone would treat that empty value as knative and lift the
+		// legacy flat fields into a scale.kpa the keda/raw deployer ignores.
+		observedDeployer := disk.Deploy.Deployer
+		if observedDeployer == "" {
+			observedDeployer = f.Deploy.Deployer
+		}
+		hasFlat := old.Metric != nil || old.Target != nil || old.Utilization != nil
+		intentKnative := f.Deployer == "" || f.Deployer == "knative"
+		observedKnative := observedDeployer == "" || observedDeployer == "knative"
+		validKPADeployer := intentKnative && observedKnative
+		if hasFlat && newScale.KPA == nil && validKPADeployer {
+			newScale.KPA = &KPAScaleOptions{
+				Metric:      old.Metric,
+				Target:      old.Target,
+				Utilization: old.Utilization,
+			}
+		}
+
+		// Only keep a top-level scale if something survived. A newScale with
+		// all-nil fields -- e.g. a non-knative file whose only scale content was
+		// legacy flat metric/target/utilization, which are not lifted into
+		// scale.kpa for that deployer -- would otherwise serialize as an empty
+		// "scale: {}" block on the next write.
+		if newScale.Min != nil || newScale.Max != nil || newScale.KPA != nil {
+			f.Scale = newScale
+		}
+	}
+
+	// If there was already a top-level scale in the file (shouldn't happen
+	// in practice, but be defensive), the on-disk value wins.
+	if disk.Scale != nil {
+		f.Scale = disk.Scale
+	}
+
+	// Clear the old location so it doesn't get serialized.
+	f.Deploy.Options.Scale = nil
+
+	// deploy.deployer and deploy.expose keep their YAML tags. Populate the
+	// observed-state fields from disk so the migration is self-contained
+	// regardless of how f was constructed. f.Root == "" (library callers)
+	// needs no handling here: the in-memory value already reflects whatever
+	// was set via the Go field name, so there's nothing on disk to migrate
+	// from and nothing to fall back to.
+	if disk.Deploy.Deployer != "" {
+		f.Deploy.Deployer = disk.Deploy.Deployer
+	}
+	if disk.Deploy.Expose != "" {
+		f.Deploy.Expose = disk.Deploy.Expose
+	}
+
+	f.SpecVersion = m.version
+	return f, nil
 }
 
 // The pertinent aspects of the Function's schema prior the 1.0.0 version migrations

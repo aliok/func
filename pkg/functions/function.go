@@ -132,6 +132,9 @@ type Function struct {
 	// Deploy defines the deployment properties for a function
 	Deploy DeploySpec `yaml:"deploy,omitempty"`
 
+	// Scale defines autoscaling configuration for the function.
+	Scale *ScaleOptions `yaml:"scale,omitempty"`
+
 	Local Local `yaml:"-"`
 }
 
@@ -480,6 +483,7 @@ func (f Function) Validate() error {
 		ValidateBuildEnvs(f.Build.BuildEnvs),
 		ValidateEnvs(f.Run.Envs),
 		validateOptions(f.Deploy.Options),
+		ValidateScale(f.Scale, f.Deployer),
 		ValidateLabels(f.Deploy.Labels),
 		validateSource(f.Build.Source),
 		validateKafka(f.Run.Kafka, f.Invoke, f.Runtime),
