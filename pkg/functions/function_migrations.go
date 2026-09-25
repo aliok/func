@@ -416,9 +416,7 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 	// (Metric, Target, Utilization), which no longer exist on ScaleOptions.
 	// Both scale locations are read: the current deploy.options.scale, and the
 	// pre-0.34 top-level options.scale (still on disk when this runs -- see the
-	// fallback below). deploy.deployer and deploy.expose keep their YAML tags;
-	// they are read here too so the migration stays self-contained for callers
-	// that pass a Function not populated via the primary unmarshal.
+	// fallback below).
 	type oldScale struct {
 		Min         *int64           `yaml:"min,omitempty"`
 		Max         *int64           `yaml:"max,omitempty"`
@@ -431,9 +429,7 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 		Scale *oldScale `yaml:"scale,omitempty"`
 	}
 	type oldDeploy struct {
-		Options  oldOptions `yaml:"options,omitempty"`
-		Deployer string     `yaml:"deployer,omitempty"`
-		Expose   string     `yaml:"expose,omitempty"`
+		Options oldOptions `yaml:"options,omitempty"`
 	}
 	var disk struct {
 		Deploy  oldDeploy     `yaml:"deploy,omitempty"`
@@ -448,15 +444,6 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 		}
 	}
 
-	// NOTE: this migration deliberately does NOT recover a legacy
-	// deploy.deployer value into f.Deployer (intent). A pre-#3953 func.yaml
-	// recorded the deployer only under deploy.deployer, and losing that intent
-	// on a delete-then-redeploy is a real (if narrow) bug -- but it is a
-	// pre-existing issue on main, unrelated to this scale migration, and is
-	// tracked separately in https://github.com/knative/func/issues/4054. The
-	// normal deploy path already recovers the deployer from observed state
-	// (config.Apply falls back to f.Deploy.Deployer), so only the
-	// delete-then-redeploy edge case is affected.
 	// Prefer the current-spec location (deploy.options.scale). Fall back to the
 	// pre-0.34 top-level options.scale: it is still on disk when this runs,
 	// because each migration re-reads the original file and
@@ -478,18 +465,16 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 
 		// scale.kpa is only valid for deployer: knative (or the unset/
 		// default deployer, which behaves as knative) -- see ValidateScale.
-		// Consider the observed deployer (deploy.deployer) as well as the
+		// Consider the observed deployer (f.Deploy.Deployer) as well as the
 		// intent (f.Deployer): a pre-#3953 keda/raw file recorded the deployer
-		// only under deploy.deployer, leaving f.Deployer empty. Keying on
-		// intent alone would treat that empty value as knative and lift the
-		// legacy flat fields into a scale.kpa the keda/raw deployer ignores.
-		observedDeployer := disk.Deploy.Deployer
-		if observedDeployer == "" {
-			observedDeployer = f.Deploy.Deployer
-		}
+		// only under deploy.deployer, leaving f.Deployer empty. The primary
+		// unmarshal already populated f.Deploy.Deployer from that key, so it is
+		// read directly rather than re-read from disk. Keying on intent alone
+		// would treat that empty value as knative and lift the legacy flat
+		// fields into a scale.kpa the keda/raw deployer ignores.
 		hasFlat := old.Metric != nil || old.Target != nil || old.Utilization != nil
 		intentKnative := f.Deployer == "" || f.Deployer == "knative"
-		observedKnative := observedDeployer == "" || observedDeployer == "knative"
+		observedKnative := f.Deploy.Deployer == "" || f.Deploy.Deployer == "knative"
 		validKPADeployer := intentKnative && observedKnative
 		if hasFlat && newScale.KPA == nil && validKPADeployer {
 			newScale.KPA = &KPAScaleOptions{
@@ -517,20 +502,9 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 
 	// The old deploy.options.scale location no longer exists on the Options
 	// struct, so it is dropped from the next write automatically -- nothing to
-	// clear in-memory.
-
-	// deploy.deployer and deploy.expose keep their YAML tags. Populate the
-	// observed-state fields from disk so the migration is self-contained
-	// regardless of how f was constructed. f.Root == "" (library callers)
-	// needs no handling here: the in-memory value already reflects whatever
-	// was set via the Go field name, so there's nothing on disk to migrate
-	// from and nothing to fall back to.
-	if disk.Deploy.Deployer != "" {
-		f.Deploy.Deployer = disk.Deploy.Deployer
-	}
-	if disk.Deploy.Expose != "" {
-		f.Deploy.Expose = disk.Deploy.Expose
-	}
+	// clear in-memory. deploy.deployer/deploy.expose keep their YAML tags and
+	// are already populated by the primary unmarshal, so this migration leaves
+	// them untouched.
 
 	f.SpecVersion = m.version
 	return f, nil

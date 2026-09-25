@@ -396,10 +396,27 @@ func TestMigrateGitToSource(t *testing.T) {
 }
 
 func TestMigrateScaleToTopLevel(t *testing.T) {
-	t.Run("flat fields move to top-level scale.kpa", func(t *testing.T) {
+	// These tests drive the migration through NewFunction(root) on an inline
+	// func.yaml -- the real load path -- rather than calling
+	// migrateScaleToTopLevel with a hand-built Function. NewFunction unmarshals
+	// the file (populating f.Deployer, f.Deploy.Deployer/Expose, etc.) and runs
+	// the full migration chain, so every fixture is a state that can actually
+	// occur on disk.
+	newFn := func(t *testing.T, funcYaml string) Function {
+		t.Helper()
 		root := t.TempDir()
-		// Write an old-format func.yaml with flat KPA fields under deploy.options.scale
-		funcYaml := `specVersion: "0.36.0"
+		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+		f, err := NewFunction(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+
+	t.Run("flat fields move to top-level scale.kpa", func(t *testing.T) {
+		migrated := newFn(t, `specVersion: "0.36.0"
 name: testfn
 runtime: go
 deploy:
@@ -410,22 +427,9 @@ deploy:
       metric: concurrency
       target: 100.0
       utilization: 70.0
-`
-		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		f := Function{
-			SpecVersion: "0.36.0",
-			Root:        root,
-		}
-		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.38.0"})
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if migrated.SpecVersion != "0.38.0" {
-			t.Errorf("specVersion = %q, want 0.38.0", migrated.SpecVersion)
+`)
+		if migrated.SpecVersion != LastSpecVersion() {
+			t.Errorf("specVersion = %q, want %q", migrated.SpecVersion, LastSpecVersion())
 		}
 		if migrated.Scale == nil {
 			t.Fatal("expected top-level scale to be populated")
@@ -451,22 +455,12 @@ deploy:
 	})
 
 	t.Run("no-op when no scale fields", func(t *testing.T) {
-		root := t.TempDir()
-		funcYaml := `specVersion: "0.36.0"
+		migrated := newFn(t, `specVersion: "0.36.0"
 name: testfn
 runtime: go
-`
-		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		f := Function{SpecVersion: "0.36.0", Root: root}
-		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.38.0"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if migrated.SpecVersion != "0.38.0" {
-			t.Errorf("specVersion = %q, want 0.38.0", migrated.SpecVersion)
+`)
+		if migrated.SpecVersion != LastSpecVersion() {
+			t.Errorf("specVersion = %q, want %q", migrated.SpecVersion, LastSpecVersion())
 		}
 		if migrated.Scale != nil {
 			t.Errorf("expected nil scale, got %+v", migrated.Scale)
@@ -474,8 +468,7 @@ runtime: go
 	})
 
 	t.Run("preserves kpa sub-key when already set", func(t *testing.T) {
-		root := t.TempDir()
-		funcYaml := `specVersion: "0.36.0"
+		migrated := newFn(t, `specVersion: "0.36.0"
 name: testfn
 runtime: go
 deploy:
@@ -483,16 +476,7 @@ deploy:
     scale:
       kpa:
         metric: rps
-`
-		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		f := Function{SpecVersion: "0.36.0", Root: root}
-		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.38.0"})
-		if err != nil {
-			t.Fatal(err)
-		}
+`)
 		if migrated.Scale == nil || migrated.Scale.KPA == nil {
 			t.Fatal("expected scale.kpa to be preserved")
 		}
@@ -502,21 +486,11 @@ deploy:
 	})
 
 	t.Run("non-keda deployer no triggers added", func(t *testing.T) {
-		root := t.TempDir()
-		funcYaml := `specVersion: "0.36.0"
+		migrated := newFn(t, `specVersion: "0.36.0"
 name: testfn
 runtime: go
 deployer: raw
-`
-		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		f := Function{SpecVersion: "0.36.0", Deployer: "raw", Root: root}
-		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.38.0"})
-		if err != nil {
-			t.Fatal(err)
-		}
+`)
 		if migrated.Scale != nil {
 			t.Errorf("expected no scale for raw deployer, got %+v", migrated.Scale)
 		}
@@ -528,8 +502,7 @@ deployer: raw
 		// block in-memory, so migrateScaleToTopLevel reads it directly from
 		// disk. Reading it with the old shape also recovers the flat
 		// metric/target/utilization fields that the specs migration dropped.
-		root := t.TempDir()
-		funcYaml := `specVersion: "0.36.0"
+		migrated := newFn(t, `specVersion: "0.33.0"
 name: testfn
 runtime: go
 options:
@@ -539,16 +512,7 @@ options:
     metric: concurrency
     target: 100
     utilization: 70
-`
-		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		f := Function{SpecVersion: "0.36.0", Root: root}
-		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.38.0"})
-		if err != nil {
-			t.Fatal(err)
-		}
+`)
 		if migrated.Scale == nil {
 			t.Fatal("expected the pre-0.34 top-level scale to be lifted, got nil")
 		}
@@ -577,8 +541,7 @@ options:
 		// metric/target/utilization fields must not be lifted into scale.kpa
 		// for a raw/keda function, or the migrated function would immediately
 		// fail ValidateScale ("scale.kpa requires deployer: knative").
-		root := t.TempDir()
-		funcYaml := `specVersion: "0.36.0"
+		migrated := newFn(t, `specVersion: "0.36.0"
 name: testfn
 runtime: go
 deployer: raw
@@ -588,16 +551,7 @@ deploy:
       metric: concurrency
       target: 100.0
       utilization: 70.0
-`
-		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		f := Function{SpecVersion: "0.36.0", Deployer: "raw", Root: root}
-		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.38.0"})
-		if err != nil {
-			t.Fatal(err)
-		}
+`)
 		// The flat fields were all this file carried and none are lifted for a
 		// raw deployer, so nothing survives: Scale must be left nil rather than
 		// an empty "scale: {}" that would serialize on the next write.
@@ -611,13 +565,12 @@ deploy:
 
 	t.Run("legacy flat fields do not produce scale.kpa when the deployer is recorded only under deploy.deployer", func(t *testing.T) {
 		// Pre-#3953 files recorded the deployer intent only under
-		// deploy.deployer, so f.Deployer is empty at migration time. The
-		// migration must still consult that observed deployer: for a keda
-		// function the legacy flat fields must not be lifted into a scale.kpa
-		// the keda deployer ignores (and which would fail ValidateScale once
-		// the deployer is recovered on deploy).
-		root := t.TempDir()
-		funcYaml := `specVersion: "0.36.0"
+		// deploy.deployer, so f.Deployer is empty. The migration must still
+		// consult that observed deployer: for a keda function the legacy flat
+		// fields must not be lifted into a scale.kpa the keda deployer ignores
+		// (and which would fail ValidateScale once the deployer is recovered on
+		// deploy).
+		migrated := newFn(t, `specVersion: "0.36.0"
 name: testfn
 runtime: go
 deploy:
@@ -627,18 +580,7 @@ deploy:
       metric: concurrency
       target: 100.0
       utilization: 70.0
-`
-		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		// f.Deployer (intent) intentionally left empty, mirroring a pre-#3953
-		// file whose deployer lives only under deploy.deployer.
-		f := Function{SpecVersion: "0.36.0", Root: root}
-		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.38.0"})
-		if err != nil {
-			t.Fatal(err)
-		}
+`)
 		if migrated.Deploy.Deployer != "keda" {
 			t.Errorf("Deploy.Deployer = %q, want keda", migrated.Deploy.Deployer)
 		}
@@ -652,31 +594,19 @@ deploy:
 		}
 	})
 
-	t.Run("old deploy.deployer/deploy.expose keys populate the observed-state fields", func(t *testing.T) {
+	t.Run("deploy.deployer/deploy.expose survive migration without becoming intent", func(t *testing.T) {
 		// A pre-#3953 legacy file recorded the deployer only under the old
-		// deploy.deployer key. The migration copies deploy.deployer/expose
-		// into the observed-state fields (Deploy.Deployer/Expose) so a
-		// Function handed to the migration without going through the primary
-		// unmarshal still carries them. It intentionally does NOT promote the
-		// legacy value to f.Deployer (intent) -- that recovery was removed as
-		// an unrelated, pre-existing concern (see the follow-up ticket).
-		root := t.TempDir()
-		funcYaml := `specVersion: "0.36.0"
+		// deploy.deployer key. Those observed-state fields must survive the
+		// migration, but it must NOT promote the legacy value to f.Deployer
+		// (intent) -- that recovery was removed as an unrelated, pre-existing
+		// concern (see the follow-up ticket).
+		migrated := newFn(t, `specVersion: "0.36.0"
 name: testfn
 runtime: go
 deploy:
   deployer: keda
   expose: route
-`
-		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		f := Function{SpecVersion: "0.36.0", Root: root}
-		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.38.0"})
-		if err != nil {
-			t.Fatal(err)
-		}
+`)
 		if migrated.Deploy.Deployer != "keda" {
 			t.Errorf("Deploy.Deployer = %q, want keda", migrated.Deploy.Deployer)
 		}
@@ -691,26 +621,16 @@ deploy:
 	})
 
 	t.Run("migration never touches f.Deployer intent", func(t *testing.T) {
-		// The migration must leave the intent field exactly as the caller set
-		// it -- it neither invents intent from the legacy observed field nor
-		// overrides an already-present one.
-		root := t.TempDir()
-		funcYaml := `specVersion: "0.36.0"
+		// The migration must leave the intent field exactly as it was loaded --
+		// it neither invents intent from the legacy observed field nor overrides
+		// an already-present one.
+		migrated := newFn(t, `specVersion: "0.36.0"
 name: testfn
 runtime: go
 deployer: raw
 deploy:
   deployer: knative
-`
-		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		f := Function{SpecVersion: "0.36.0", Deployer: "raw", Root: root}
-		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.38.0"})
-		if err != nil {
-			t.Fatal(err)
-		}
+`)
 		if migrated.Deployer != "raw" {
 			t.Errorf("Deployer = %q, want raw (must be left untouched)", migrated.Deployer)
 		}
@@ -720,44 +640,13 @@ deploy:
 	})
 
 	t.Run("no-op when neither old deployer/expose key is present", func(t *testing.T) {
-		root := t.TempDir()
-		funcYaml := `specVersion: "0.36.0"
+		migrated := newFn(t, `specVersion: "0.36.0"
 name: testfn
 runtime: go
-`
-		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		f := Function{SpecVersion: "0.36.0", Root: root}
-		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.38.0"})
-		if err != nil {
-			t.Fatal(err)
-		}
+`)
 		if migrated.Deploy.Deployer != "" || migrated.Deploy.Expose != "" {
 			t.Errorf("expected both fields to stay empty, got Deployer=%q Expose=%q",
 				migrated.Deploy.Deployer, migrated.Deploy.Expose)
-		}
-	})
-
-	t.Run("empty Root does not touch the in-memory deployer/expose value", func(t *testing.T) {
-		// Library callers can construct a Function with no backing file.
-		// The in-memory Deploy.Deployer/Expose already reflect
-		// whatever the caller set via the current Go field names -- this
-		// migration must leave them alone, not clear them.
-		f := Function{
-			SpecVersion: "0.36.0",
-			Deploy:      DeploySpec{Deployer: "raw", Expose: "none"},
-		}
-		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.38.0"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if migrated.Deploy.Deployer != "raw" {
-			t.Errorf("Deploy.Deployer = %q, want raw", migrated.Deploy.Deployer)
-		}
-		if migrated.Deploy.Expose != "none" {
-			t.Errorf("Deploy.Expose = %q, want none", migrated.Deploy.Expose)
 		}
 	})
 }
