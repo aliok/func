@@ -41,10 +41,12 @@ func ValidateScale(scale *ScaleOptions, deployer string) (errors []string) {
 		errors = append(errors, "scale.max must be >= 1 when deployer is keda: 0 (\"no limit\") is not a valid value, leave scale.max unset to use keda's default")
 	}
 
-	if scale.KPA != nil && deployer != "knative" && deployer != "" {
-		errors = append(errors, "scale.kpa requires deployer: knative")
-	}
-
+	// scale.kpa is only consumed by the knative deployer (setServiceOptions);
+	// raw and keda ignore it. That mismatch is not a validation error -- it is
+	// surfaced as an ignored-with-warning case at deploy time (see
+	// warnScaleKpaIgnore in cmd/deploy.go), mirroring how expose is handled for
+	// deployers that ignore it. The values themselves are still validated so a
+	// bad metric/target/utilization is caught regardless of deployer.
 	if scale.KPA != nil {
 		errors = append(errors, validateKPAScale(scale.KPA)...)
 	}

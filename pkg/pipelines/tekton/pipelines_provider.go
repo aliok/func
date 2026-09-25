@@ -159,14 +159,12 @@ func (pp *PipelinesProvider) Run(ctx context.Context, f fn.Function) (string, fn
 		deployer = f.Deploy.Deployer
 	}
 	f.Deploy.Deployer = deployer
-	// Also carry the resolved deployer into the intent field. func-util selects
-	// the deployer from Deployer, but f.Validate() below (and ValidateScale in
-	// particular) reads f.Deployer. On a flag-less redeploy the intent is empty,
-	// and ValidateScale treats an empty deployer as knative -- so leaving it
-	// empty would let a previously-deployed keda/raw function's scale.kpa config
-	// pass validation only to be silently ignored on cluster. Recovering the
-	// observed deployer here makes that mismatch fail validation instead.
-	f.Deployer = deployer
+	// The intent field (f.Deployer) is deliberately left as-is. func-util reads
+	// f.Deployer first but falls back to f.Deploy.Deployer (set above), so
+	// deployer selection is preserved on a flag-less redeploy. scale.kpa left on
+	// a non-knative function is no longer a validation error -- it is an
+	// ignored-with-warning case (see warnScaleKpaIgnore), so there is nothing to
+	// recover here.
 
 	// Applied exposure (f.Deploy.Expose) is deliberately NOT derived from intent
 	// here: the pipeline runs a published func-util image this build does not

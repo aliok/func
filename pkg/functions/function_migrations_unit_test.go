@@ -467,24 +467,6 @@ runtime: go
 		}
 	})
 
-	t.Run("preserves kpa sub-key when already set", func(t *testing.T) {
-		migrated := newFn(t, `specVersion: "0.36.0"
-name: testfn
-runtime: go
-deploy:
-  options:
-    scale:
-      kpa:
-        metric: rps
-`)
-		if migrated.Scale == nil || migrated.Scale.KPA == nil {
-			t.Fatal("expected scale.kpa to be preserved")
-		}
-		if *migrated.Scale.KPA.Metric != "rps" {
-			t.Errorf("scale.kpa.metric = %q, want rps", *migrated.Scale.KPA.Metric)
-		}
-	})
-
 	t.Run("non-keda deployer no triggers added", func(t *testing.T) {
 		migrated := newFn(t, `specVersion: "0.36.0"
 name: testfn
@@ -536,11 +518,11 @@ options:
 		}
 	})
 
-	t.Run("legacy flat fields do not produce scale.kpa for a non-knative deployer", func(t *testing.T) {
-		// scale.kpa is only valid for deployer: knative. Legacy flat
-		// metric/target/utilization fields must not be lifted into scale.kpa
-		// for a raw/keda function, or the migrated function would immediately
-		// fail ValidateScale ("scale.kpa requires deployer: knative").
+	t.Run("legacy flat fields move to scale.kpa for a non-knative deployer too", func(t *testing.T) {
+		// The migration is a plain move: it lifts the legacy flat
+		// metric/target/utilization fields into scale.kpa without inspecting the
+		// deployer. scale.kpa on a raw function is not a validation error -- it
+		// is ignored with a warning at deploy time (see warnScaleKpaIgnore).
 		migrated := newFn(t, `specVersion: "0.36.0"
 name: testfn
 runtime: go
@@ -552,24 +534,22 @@ deploy:
       target: 100.0
       utilization: 70.0
 `)
-		// The flat fields were all this file carried and none are lifted for a
-		// raw deployer, so nothing survives: Scale must be left nil rather than
-		// an empty "scale: {}" that would serialize on the next write.
-		if migrated.Scale != nil {
-			t.Errorf("expected scale to stay nil for deployer: raw, got %+v", migrated.Scale)
+		if migrated.Scale == nil || migrated.Scale.KPA == nil {
+			t.Fatalf("expected scale.kpa to be lifted for deployer: raw, got %+v", migrated.Scale)
+		}
+		if migrated.Scale.KPA.Metric == nil || *migrated.Scale.KPA.Metric != "concurrency" {
+			t.Errorf("scale.kpa.metric = %v, want concurrency", migrated.Scale.KPA.Metric)
 		}
 		if errs := ValidateScale(migrated.Scale, "raw"); len(errs) != 0 {
 			t.Errorf("expected the migrated scale to pass validation, got: %v", errs)
 		}
 	})
 
-	t.Run("legacy flat fields do not produce scale.kpa when the deployer is recorded only under deploy.deployer", func(t *testing.T) {
+	t.Run("legacy flat fields move to scale.kpa when the deployer is recorded only under deploy.deployer", func(t *testing.T) {
 		// Pre-#3953 files recorded the deployer intent only under
-		// deploy.deployer, so f.Deployer is empty. The migration must still
-		// consult that observed deployer: for a keda function the legacy flat
-		// fields must not be lifted into a scale.kpa the keda deployer ignores
-		// (and which would fail ValidateScale once the deployer is recovered on
-		// deploy).
+		// deploy.deployer. The migration is deployer-agnostic, so the legacy
+		// flat fields are lifted into scale.kpa regardless; keda ignores it with
+		// a warning at deploy time.
 		migrated := newFn(t, `specVersion: "0.36.0"
 name: testfn
 runtime: go
@@ -584,10 +564,11 @@ deploy:
 		if migrated.Deploy.Deployer != "keda" {
 			t.Errorf("Deploy.Deployer = %q, want keda", migrated.Deploy.Deployer)
 		}
-		// Same as the raw case: the flat fields are not lifted for keda and
-		// nothing else was set, so Scale must be left nil, not an empty block.
-		if migrated.Scale != nil {
-			t.Errorf("expected scale to stay nil for a keda-observed function, got %+v", migrated.Scale)
+		if migrated.Scale == nil || migrated.Scale.KPA == nil {
+			t.Fatalf("expected scale.kpa to be lifted for a keda-observed function, got %+v", migrated.Scale)
+		}
+		if migrated.Scale.KPA.Metric == nil || *migrated.Scale.KPA.Metric != "concurrency" {
+			t.Errorf("scale.kpa.metric = %v, want concurrency", migrated.Scale.KPA.Metric)
 		}
 		if errs := ValidateScale(migrated.Scale, "keda"); len(errs) != 0 {
 			t.Errorf("expected the migrated scale to pass keda validation, got: %v", errs)

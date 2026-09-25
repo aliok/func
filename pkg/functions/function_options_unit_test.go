@@ -265,9 +265,20 @@ func Test_ValidateScale(t *testing.T) {
 			"knative", 1,
 		},
 		{
-			"kpa requires knative deployer",
+			// scale.kpa on a non-knative deployer is no longer a validation
+			// error -- it is ignored with a warning at deploy time. The kpa
+			// values are still validated, so a valid metric passes here.
+			"kpa on non-knative deployer is accepted (ignored with warning)",
 			&ScaleOptions{
 				KPA: &KPAScaleOptions{Metric: ptr.String("concurrency")},
+			},
+			"raw", 0,
+		},
+		{
+			// ...but the kpa values are still validated regardless of deployer.
+			"kpa with invalid metric is rejected even on non-knative deployer",
+			&ScaleOptions{
+				KPA: &KPAScaleOptions{Metric: ptr.String("bad")},
 			},
 			"raw", 1,
 		},

@@ -418,12 +418,11 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 	// pre-0.34 top-level options.scale (still on disk when this runs -- see the
 	// fallback below).
 	type oldScale struct {
-		Min         *int64           `yaml:"min,omitempty"`
-		Max         *int64           `yaml:"max,omitempty"`
-		Metric      *string          `yaml:"metric,omitempty"`
-		Target      *float64         `yaml:"target,omitempty"`
-		Utilization *float64         `yaml:"utilization,omitempty"`
-		KPA         *KPAScaleOptions `yaml:"kpa,omitempty"`
+		Min         *int64   `yaml:"min,omitempty"`
+		Max         *int64   `yaml:"max,omitempty"`
+		Metric      *string  `yaml:"metric,omitempty"`
+		Target      *float64 `yaml:"target,omitempty"`
+		Utilization *float64 `yaml:"utilization,omitempty"`
 	}
 	type oldOptions struct {
 		Scale *oldScale `yaml:"scale,omitempty"`
@@ -460,23 +459,16 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 		newScale := &ScaleOptions{
 			Min: old.Min,
 			Max: old.Max,
-			KPA: old.KPA,
 		}
 
-		// scale.kpa is only valid for deployer: knative (or the unset/
-		// default deployer, which behaves as knative) -- see ValidateScale.
-		// Consider the observed deployer (f.Deploy.Deployer) as well as the
-		// intent (f.Deployer): a pre-#3953 keda/raw file recorded the deployer
-		// only under deploy.deployer, leaving f.Deployer empty. The primary
-		// unmarshal already populated f.Deploy.Deployer from that key, so it is
-		// read directly rather than re-read from disk. Keying on intent alone
-		// would treat that empty value as knative and lift the legacy flat
-		// fields into a scale.kpa the keda/raw deployer ignores.
-		hasFlat := old.Metric != nil || old.Target != nil || old.Utilization != nil
-		intentKnative := f.Deployer == "" || f.Deployer == "knative"
-		observedKnative := f.Deploy.Deployer == "" || f.Deploy.Deployer == "knative"
-		validKPADeployer := intentKnative && observedKnative
-		if hasFlat && newScale.KPA == nil && validKPADeployer {
+		// Lift the flat metric/target/utilization fields into scale.kpa for
+		// every deployer, without inspecting the deployer. These were only ever
+		// consumed by the knative deployer's setServiceOptions; raw reads only
+		// min and keda only min/max, so both ignore them regardless -- there is
+		// no correctness reason to gate the lift. A scale.kpa left on a
+		// non-knative function is reported as an ignored-with-warning case at
+		// deploy time (see warnScaleKpaIgnore), not dropped here.
+		if old.Metric != nil || old.Target != nil || old.Utilization != nil {
 			newScale.KPA = &KPAScaleOptions{
 				Metric:      old.Metric,
 				Target:      old.Target,
@@ -485,10 +477,9 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 		}
 
 		// Only keep a top-level scale if something survived. A newScale with
-		// all-nil fields -- e.g. a non-knative file whose only scale content was
-		// legacy flat metric/target/utilization, which are not lifted into
-		// scale.kpa for that deployer -- would otherwise serialize as an empty
-		// "scale: {}" block on the next write.
+		// all-nil fields -- e.g. a deploy.options.scale that was present but
+		// empty -- would otherwise serialize as an empty "scale: {}" block on
+		// the next write.
 		if newScale.Min != nil || newScale.Max != nil || newScale.KPA != nil {
 			f.Scale = newScale
 		}
