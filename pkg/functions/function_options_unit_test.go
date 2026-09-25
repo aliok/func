@@ -14,24 +14,6 @@ func Test_validateOptions(t *testing.T) {
 		errs    int
 	}{
 		{
-			"correct 'scale.min'",
-			Options{
-				Scale: &ScaleOptions{
-					Min: ptr.Int64(1),
-				},
-			},
-			0,
-		},
-		{
-			"correct 'scale.max'",
-			Options{
-				Scale: &ScaleOptions{
-					Max: ptr.Int64(10),
-				},
-			},
-			0,
-		},
-		{
 			"correct 'resources.requests.cpu'",
 			Options{
 				Resources: &ResourcesOptions{

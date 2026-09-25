@@ -310,6 +310,49 @@ func TestUnknownFieldsNoWarningPreMigration(t *testing.T) {
 	}
 }
 
+// TestUnknownFieldsWarnOnStaleScale verifies that once Options no longer
+// carries a scale field, an at-spec func.yaml that still has a stale
+// deploy.options.scale block is surfaced by the unknown-fields warning rather
+// than silently accepted. This is the behavior gauron99's G1 comment was after:
+// while the key mapped to a struct field it passed strict unmarshal unnoticed.
+func TestUnknownFieldsWarnOnStaleScale(t *testing.T) {
+	unknownFieldsOnce = sync.Once{}
+
+	root := t.TempDir()
+	funcYaml := "specVersion: \"" + LastSpecVersion() + "\"\n" + `name: testfn
+runtime: go
+created: 2024-01-01T00:00:00Z
+deploy:
+  options:
+    scale:
+      min: 1
+      max: 3
+`
+	if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	_, _ = NewFunction(root)
+
+	w.Close()
+	os.Stderr = old
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+
+	if !strings.Contains(output, "Warning") {
+		t.Errorf("expected an unknown-fields warning for a stale deploy.options.scale, got: %q", output)
+	}
+	if !strings.Contains(output, "scale") {
+		t.Errorf("expected the warning to name the stale scale key, got: %q", output)
+	}
+}
+
 func writeFunc(f Function, root string) error {
 	bb, err := yaml.Marshal(&f)
 	if err != nil {
@@ -405,9 +448,6 @@ deploy:
 		if *migrated.Scale.KPA.Utilization != 70.0 {
 			t.Errorf("scale.kpa.utilization = %f, want 70", *migrated.Scale.KPA.Utilization)
 		}
-		if migrated.Deploy.Options.Scale != nil {
-			t.Error("expected deploy.options.scale to be cleared")
-		}
 	})
 
 	t.Run("no-op when no scale fields", func(t *testing.T) {
@@ -482,26 +522,35 @@ deployer: raw
 		}
 	})
 
-	t.Run("empty Root falls back to the in-memory scale instead of dropping it", func(t *testing.T) {
-		// Library callers can construct a Function with no backing file
-		// (Root == ""). The migration must not silently clear
-		// Deploy.Options.Scale without moving it to the top-level field.
-		min := int64(2)
-		max := int64(20)
-		f := Function{
-			SpecVersion: "0.36.0",
-			Deploy: DeploySpec{
-				Options: Options{
-					Scale: &ScaleOptions{Min: &min, Max: &max},
-				},
-			},
+	t.Run("lifts pre-0.34 top-level options.scale from disk", func(t *testing.T) {
+		// Before the specs restructure (0.34.0), scale lived under a top-level
+		// options.scale block. migrateToSpecsStructure no longer stages that
+		// block in-memory, so migrateScaleToTopLevel reads it directly from
+		// disk. Reading it with the old shape also recovers the flat
+		// metric/target/utilization fields that the specs migration dropped.
+		root := t.TempDir()
+		funcYaml := `specVersion: "0.36.0"
+name: testfn
+runtime: go
+options:
+  scale:
+    min: 2
+    max: 20
+    metric: concurrency
+    target: 100
+    utilization: 70
+`
+		if err := os.WriteFile(filepath.Join(root, FunctionFile), []byte(funcYaml), 0644); err != nil {
+			t.Fatal(err)
 		}
+
+		f := Function{SpecVersion: "0.36.0", Root: root}
 		migrated, err := migrateScaleToTopLevel(f, migration{version: "0.38.0"})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if migrated.Scale == nil {
-			t.Fatal("expected the in-memory scale to be moved to the top level, got nil")
+			t.Fatal("expected the pre-0.34 top-level scale to be lifted, got nil")
 		}
 		if migrated.Scale.Min == nil || *migrated.Scale.Min != 2 {
 			t.Errorf("scale.min = %v, want 2", migrated.Scale.Min)
@@ -509,8 +558,17 @@ deployer: raw
 		if migrated.Scale.Max == nil || *migrated.Scale.Max != 20 {
 			t.Errorf("scale.max = %v, want 20", migrated.Scale.Max)
 		}
-		if migrated.Deploy.Options.Scale != nil {
-			t.Error("expected deploy.options.scale to be cleared")
+		if migrated.Scale.KPA == nil {
+			t.Fatal("expected scale.kpa to be recovered from the pre-0.34 flat fields")
+		}
+		if migrated.Scale.KPA.Metric == nil || *migrated.Scale.KPA.Metric != "concurrency" {
+			t.Errorf("scale.kpa.metric = %v, want concurrency", migrated.Scale.KPA.Metric)
+		}
+		if migrated.Scale.KPA.Target == nil || *migrated.Scale.KPA.Target != 100.0 {
+			t.Errorf("scale.kpa.target = %v, want 100", migrated.Scale.KPA.Target)
+		}
+		if migrated.Scale.KPA.Utilization == nil || *migrated.Scale.KPA.Utilization != 70.0 {
+			t.Errorf("scale.kpa.utilization = %v, want 70", migrated.Scale.KPA.Utilization)
 		}
 	})
 

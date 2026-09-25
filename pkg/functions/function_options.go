@@ -7,11 +7,6 @@ import (
 )
 
 type Options struct {
-	// Scale is kept for YAML deserialization of old func.yaml files (pre-0.38.0
-	// stored scale under deploy.options.scale). The 0.34.0 migration writes to
-	// it and the 0.38.0 migration moves it to Function.Scale. Hidden from the
-	// JSON schema so new files never use this path.
-	Scale     *ScaleOptions     `yaml:"scale,omitempty" jsonschema:"-"`
 	Resources *ResourcesOptions `yaml:"resources,omitempty"`
 }
 

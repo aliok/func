@@ -280,9 +280,9 @@ func migrateToSpecsStructure(f1 Function, m migration) (Function, error) {
 		f1.Deploy.Options.Resources = f0.Options.Resources
 	}
 
-	if f0.Options.Scale != nil {
-		f1.Deploy.Options.Scale = f0.Options.Scale
-	}
+	// Any pre-0.34 top-level options.scale is left on disk for
+	// migrateScaleToTopLevel to read and lift into the top-level scale field;
+	// it is not staged onto Options here (Options no longer carries scale).
 
 	if f0.Labels != nil {
 		f1.Deploy.Labels = append(f1.Deploy.Labels, f0.Labels...)
@@ -414,9 +414,11 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 	// Read the on-disk func.yaml to capture pre-migration fields that no
 	// longer deserialize under their current shape: the flat KPA fields
 	// (Metric, Target, Utilization), which no longer exist on ScaleOptions.
-	// deploy.deployer and deploy.expose keep their YAML tags; they are read
-	// here too so the migration stays self-contained for callers that pass a
-	// Function not populated via the primary unmarshal.
+	// Both scale locations are read: the current deploy.options.scale, and the
+	// pre-0.34 top-level options.scale (still on disk when this runs -- see the
+	// fallback below). deploy.deployer and deploy.expose keep their YAML tags;
+	// they are read here too so the migration stays self-contained for callers
+	// that pass a Function not populated via the primary unmarshal.
 	type oldScale struct {
 		Min         *int64           `yaml:"min,omitempty"`
 		Max         *int64           `yaml:"max,omitempty"`
@@ -434,8 +436,9 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 		Expose   string     `yaml:"expose,omitempty"`
 	}
 	var disk struct {
-		Deploy oldDeploy     `yaml:"deploy,omitempty"`
-		Scale  *ScaleOptions `yaml:"scale,omitempty"`
+		Deploy  oldDeploy     `yaml:"deploy,omitempty"`
+		Options oldOptions    `yaml:"options,omitempty"`
+		Scale   *ScaleOptions `yaml:"scale,omitempty"`
 	}
 
 	if f.Root != "" {
@@ -454,28 +457,16 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 	// normal deploy path already recovers the deployer from observed state
 	// (config.Apply falls back to f.Deploy.Deployer), so only the
 	// delete-then-redeploy edge case is affected.
-	// The on-disk value is the source of truth: it is read directly because
-	// the old flat metric/target/utilization fields no longer deserialize under
-	// the current ScaleOptions type. This means a caller that programmatically
-	// set f.Deploy.Options.Scale before Migrate() would have that in-memory
-	// value shadowed by whatever is on disk. An earlier migration does write it
-	// in-memory (migrateToSpecsStructure lifts the pre-specs options.scale into
-	// f.Deploy.Options.Scale), but only for files old enough that the disk read
-	// yields the pre-specs layout -- with nothing under deploy.options.scale on
-	// disk -- so the fallback below picks that value up rather than it being
-	// shadowed. Shadowing thus stays theoretical, and it is why the in-memory
-	// value is a fallback (below), used only when the disk read yields nothing.
+	// Prefer the current-spec location (deploy.options.scale). Fall back to the
+	// pre-0.34 top-level options.scale: it is still on disk when this runs,
+	// because each migration re-reads the original file and
+	// migrateToSpecsStructure no longer stages that block onto Options
+	// in-memory. Reading it here with oldScale (rather than through the current
+	// ScaleOptions) also recovers the pre-0.34 flat metric/target/utilization
+	// fields, which the specs migration would otherwise drop.
 	old := disk.Deploy.Options.Scale
-	if old == nil && f.Deploy.Options.Scale != nil {
-		// f.Root is empty (library callers construct a Function without a
-		// backing file) or the on-disk read found nothing: fall back to the
-		// already-deserialized in-memory value instead of treating it as
-		// absent. It can't carry the old flat metric/target/utilization
-		// fields -- those no longer exist on the current ScaleOptions type,
-		// so there's nothing on this path to recover them from -- but its
-		// Min/Max/KPA must not be silently dropped.
-		mem := f.Deploy.Options.Scale
-		old = &oldScale{Min: mem.Min, Max: mem.Max, KPA: mem.KPA}
+	if old == nil {
+		old = disk.Options.Scale
 	}
 
 	if old != nil {
@@ -524,8 +515,9 @@ func migrateScaleToTopLevel(f Function, m migration) (Function, error) {
 		f.Scale = disk.Scale
 	}
 
-	// Clear the old location so it doesn't get serialized.
-	f.Deploy.Options.Scale = nil
+	// The old deploy.options.scale location no longer exists on the Options
+	// struct, so it is dropped from the next write automatically -- nothing to
+	// clear in-memory.
 
 	// deploy.deployer and deploy.expose keep their YAML tags. Populate the
 	// observed-state fields from disk so the migration is self-contained
